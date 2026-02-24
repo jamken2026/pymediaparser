@@ -1,0 +1,36 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pymediaparser"
+version = "0.1.0"
+description = "媒体流解析与视觉语言模型工具包"
+readme = "README.md"
+requires-python = ">=3.10"
+license = {text = "MIT"}
+
+dependencies = [
+    "torch",
+    "torchvision",
+    "numpy",
+    "pillow",
+    "requests",
+    "av",
+    "opencv-python",
+    "imagehash",
+    "torchreid",
+    "scikit-learn",
+]
+
+[project.optional-dependencies]
+vlm = [
+    "transformers",
+    "qwen-vl-utils",
+]
+dev = [
+    "pytest",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]

@@ -1,0 +1,213 @@
+"""SimpleSmartSampler - 简单智能采样器实现"""
+
+from __future__ import annotations
+import logging
+from typing import Iterator, Dict, Any, Optional
+import numpy as np
+from PIL import Image
+import cv2
+
+from .base import SmartSampler
+from .motion_detector import MotionDetector
+from .change_analyzer import ChangeAnalyzer
+from .foreground_extractor import ForegroundExtractor
+
+logger = logging.getLogger(__name__)
+
+
+class SimpleSmartSampler(SmartSampler):
+    """简单智能采样器 - 基于运动检测和变化分析的自适应帧采样。
+
+    继承自 SmartSampler 基类，实现基础的智能采样逻辑。
+    """
+
+    def __init__(
+        self,
+        enable_smart_sampling: bool = True,
+        motion_method: str = 'MOG2',
+        ssim_threshold: float = 0.80,
+        motion_threshold: float = 0.1,
+        backup_interval: float = 30.0,
+        min_frame_interval: float = 1.0,
+    ) -> None:
+        super().__init__(
+            enable_smart_sampling=enable_smart_sampling,
+            backup_interval=backup_interval,
+            min_frame_interval=min_frame_interval,
+        )
+
+        self.motion_detector = MotionDetector(method=motion_method, threshold=motion_threshold)
+        self.change_analyzer = ChangeAnalyzer(ssim_threshold=ssim_threshold)
+        self.foreground_extractor = ForegroundExtractor()
+
+        logger.info(
+            "SimpleSmartSampler 初始化完成 - 智能采样: %s, 变化阈值: %.2f, 运动阈值: %.2f, 最小间隔: %.1fs",
+            "启用" if enable_smart_sampling else "禁用",
+            ssim_threshold, motion_threshold, min_frame_interval,
+        )
+
+    # ── 属性 ──────────────────────────────────────────────
+
+    @property
+    def frame_count(self) -> int:
+        """已送入的输入帧总数。"""
+        return self._input_frame_count
+
+    # ── 核心采样接口 ──────────────────────────────────────
+
+    def sample(
+        self, frames: Iterator[tuple[np.ndarray, float]],
+    ) -> Iterator[Dict[str, Any]]:
+        """智能采样主入口。"""
+        # 只在首次调用时打印一次日志
+        if not hasattr(self, '_sample_started'):
+            logger.info("开始智能采样 - 模式: %s", "智能采样" if self.enable_smart else "时间采样")
+            self._sample_started = True
+        
+        for frame_np, ts in frames:
+            if frame_np is None or frame_np.size == 0:
+                continue
+            
+            # 每帧送入时立即递增计数器（无论是否被筛选）
+            current_frame_idx = self._input_frame_count
+            self._input_frame_count += 1
+                
+            time_based_emit = self._should_emit_by_time(ts)
+            
+            if self.enable_smart:
+                sample_result = self._smart_sample_frame(frame_np, ts, current_frame_idx, time_based_emit)
+                if sample_result:
+                    yield sample_result
+            else:
+                if time_based_emit:
+                    pil_image = self._numpy_to_pil(frame_np)
+                    yield {
+                        'image': pil_image,
+                        'timestamp': ts,
+                        'frame_index': current_frame_idx,
+                        'significant': False,
+                        'source': 'time',
+                        'original_frame': frame_np
+                    }
+                    self._last_emit_ts = ts
+
+    # ── 内部方法 ──────────────────────────────────────────
+
+    def _smart_sample_frame(
+        self, frame_np: np.ndarray, ts: float, frame_idx: int,
+        time_based_emit: bool,
+    ) -> Optional[Dict[str, Any]]:
+        change_result = self.change_analyzer.analyze_change(frame_np)
+        motion_detected, motion_score, motion_mask = self.motion_detector.detect_motion(frame_np)
+        
+        should_emit = time_based_emit or change_result['significant'] or motion_detected
+        
+        # 帧间去重：时间间隔检查
+        if should_emit and not time_based_emit:
+            time_since_last = ts - self._last_emit_ts
+            if time_since_last < self._min_frame_interval:
+                logger.debug("帧#%d 检测到变化但时间间隔太短 (%.2fs < %.1fs)，跳过", 
+                           frame_idx, time_since_last, self._min_frame_interval)
+                return None
+        
+        if should_emit:
+            # 采样成功，更新change_analyzer的参考帧
+            self.change_analyzer.update_reference(frame_np)
+            if motion_detected:
+                cropped_frame, bbox = self.foreground_extractor.extract_foreground(frame_np, motion_mask)
+                compression_ratio = self.foreground_extractor.calculate_compression_ratio(
+                    frame_np.shape, cropped_frame.shape)
+            else:
+                cropped_frame = frame_np
+                bbox = (0, 0, frame_np.shape[1], frame_np.shape[0])
+                compression_ratio = 1.0
+            
+            pil_image = self._numpy_to_pil(cropped_frame)
+            
+            result = {
+                'image': pil_image,
+                'timestamp': ts,
+                'frame_index': frame_idx,
+                'significant': change_result['significant'] or motion_detected,
+                'source': 'smart' if not time_based_emit else 'time',
+                'original_frame': frame_np,
+                'cropped_frame': cropped_frame,
+                'bbox': bbox,
+                'compression_ratio': compression_ratio,
+                'change_metrics': {
+                    'ssim_score': change_result['ssim_score'],
+                    'combined_score': change_result['combined_score'],
+                    'motion_score': motion_score
+                }
+            }
+            
+            self._last_emit_ts = ts
+            
+            # 确定真实的触发来源（优先级：运动 > 变化 > 时间）
+            if motion_detected:
+                source = '运动'
+            elif change_result['significant']:
+                source = '变化'
+            else:
+                source = '时间'
+            
+            # 计算节省的token比例（裁剪节省的比例）
+            saved_ratio = (1.0 - compression_ratio) * 100
+            
+            # 打印详细的采样决策信息
+            logger.info(
+                "[送VLM] 帧#%d | ts=%.3fs | "
+                "相似度=%.3f(阈值<%.2f) | "
+                "运动=%s(得分=%.3f) | "
+                "综合=%.3f | "
+                "来源=%s | "
+                "裁剪节省=%.1f%%",
+                frame_idx,
+                ts,
+                change_result['ssim_score'],
+                self.change_analyzer.ssim_threshold,
+                '是' if motion_detected else '否',
+                motion_score,
+                change_result['combined_score'],
+                source,
+                saved_ratio
+            )
+            
+            return result
+        
+        return None
+
+    def _should_emit_by_time(self, ts: float) -> bool:
+        """检查是否满足保底时间间隔。
+        
+        当画面长时间无变化时，强制采样一帧避免遗漏。
+        使用 backup_interval 参数控制（默认30秒）。
+        """
+        if ts < self._last_emit_ts:
+            logger.info("检测到时间戳回跳 (%.3f -> %.3f)，重置采样状态", 
+                       self._last_emit_ts, ts)
+            self._last_emit_ts = -float('inf')
+            return True
+        
+        return (ts - self._last_emit_ts) >= self._backup_interval
+
+    # ── 状态管理 ──────────────────────────────────────────
+
+    def reset(self) -> None:
+        """重置所有状态。"""
+        self._last_emit_ts = -float('inf')
+        self._input_frame_count = 0
+        self.motion_detector.reset()
+        self.change_analyzer.reset()
+        logger.info("SimpleSmartSampler 状态已重置")
+
+    def get_statistics(self) -> Dict[str, Any]:
+        """获取统计信息。"""
+        return {
+            'total_frames_processed': self.frame_count,
+            'smart_sampling_enabled': self.enable_smart,
+            'backup_interval': self._backup_interval,
+            'min_frame_interval': self._min_frame_interval,
+            'motion_detector_method': self.motion_detector.method,
+            'ssim_threshold': self.change_analyzer.ssim_threshold,
+        }

@@ -1,0 +1,54 @@
+# ── IDE 和编辑器 ──
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# ── Qoder 工具目录 ──
+.qoder/
+
+# ── Conda 虚拟环境 ──
+conda_env/
+venv/
+.env/
+
+# ── 模型文件（通常很大）──
+models/
+*.pth
+*.bin
+*.safetensors
+*.onnx
+
+# ── Python 缓存 ──
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+dist/
+build/
+*.egg
+
+# ── 测试覆盖率 ──
+.coverage
+htmlcov/
+.pytest_cache/
+
+# ── 类型检查 ──
+.pytype/
+.mypy_cache/
+
+# ── 系统文件 ──
+.DS_Store
+Thumbs.db
+
+# ── 日志和临时文件 ──
+*.log
+*.tmp
+logs/
+tmp/
+
+# ── 本地配置 ──
+.env.local
+*.local
