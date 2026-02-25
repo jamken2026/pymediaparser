@@ -38,6 +38,7 @@ class MLSmartSampler(SmartSampler):
         motion_threshold: float = 0.1,
         backup_interval: float = 30.0,
         min_frame_interval: float = 1.0,
+        crop_padding_ratio: float = 0.2,
     ) -> None:
         super().__init__(
             enable_smart_sampling=enable_smart_sampling,
@@ -62,15 +63,15 @@ class MLSmartSampler(SmartSampler):
         # Layer 2: 精细验证器
         self.frame_validator = FrameValidator()
 
-        # 前景提取器（复用现有组件）
-        self.foreground_extractor = ForegroundExtractor()
+        # 前景提取器（裁剪时保留边缘背景）
+        self.foreground_extractor = ForegroundExtractor(padding_ratio=crop_padding_ratio)
 
         logger.info(
             "MLSmartSampler 初始化完成 - 智能采样: %s, "
-            "运动阈值: %.2f, 最小间隔: %.1fs, 保底间隔: %.1fs",
+            "运动阈值: %.2f, 最小间隔: %.1fs, 保底间隔: %.1fs, 裁剪边缘扩展: %.0f%%",
             "启用" if enable_smart_sampling else "禁用",
             motion_threshold,
-            min_frame_interval, backup_interval,
+            min_frame_interval, backup_interval, crop_padding_ratio * 100,
         )
 
     # ── 属性 ──────────────────────────────────────────
@@ -267,7 +268,6 @@ class MLSmartSampler(SmartSampler):
         self.frame_validator.update_reference(frame_np)
 
         # 日志（扩展格式）
-        saved_ratio = (1.0 - compression_ratio) * 100
         has_motion = 'motion' in triggers
         is_peak = validation.get('is_peak', False)
         window_mean = validation.get('window_mean', 0.0)
@@ -282,14 +282,14 @@ class MLSmartSampler(SmartSampler):
             "L2得分=%.3f | 窗口均值=%.3f | 峰值=%s | "
             "运动=%s(得分=%.3f) | "
             "来源=%s | "
-            "裁剪节省=%.1f%% | "
+            "裁剪后比例=%.1f%% | "
             "触发器=%s | "
             "L0通过率=%.1f%% | L1触发率=%.1f%%",
             frame_idx, ts,
             validation['score'], window_mean, '是' if is_peak else '否',
             '是' if has_motion else '否', motion_score,
             source_label,
-            saved_ratio,
+            compression_ratio * 100,
             triggers,
             l0_rate, l1_rate,
         )

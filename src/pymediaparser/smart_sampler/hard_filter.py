@@ -32,7 +32,7 @@ class HardFilter:
         black_threshold: int = 10,
         white_threshold: int = 245,
         entropy_low: float = 3.0,
-        entropy_high: float = 7.0,
+        entropy_high: float = 7.5,
         size_change_tolerance: float = 0.05,
     ) -> None:
         self._min_frame_interval = min_frame_interval
@@ -104,9 +104,14 @@ class HardFilter:
         # 避免 log2(0)
         nonzero = hist[hist > 0]
         entropy = float(-np.sum(nonzero * np.log2(nonzero)))
-        if entropy < self._entropy_low or entropy > self._entropy_high:
+        if entropy < self._entropy_low:
             self._reject_count += 1
-            return False, '熵异常'
+            logger.debug("熵值过低: %.2f < %.2f (画面单调)", entropy, self._entropy_low)
+            return False, f'熵异常(过低:{entropy:.2f})'
+        if entropy > self._entropy_high:
+            self._reject_count += 1
+            logger.debug("熵值过高: %.2f > %.2f (疑似噪声)", entropy, self._entropy_high)
+            return False, f'熵异常(过高:{entropy:.2f})'
 
         # 5. 分辨率一致性
         h, w = frame.shape[:2]

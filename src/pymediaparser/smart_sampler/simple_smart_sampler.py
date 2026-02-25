@@ -151,8 +151,6 @@ class SimpleSmartSampler(SmartSampler):
             else:
                 source = '时间'
             
-            # 计算节省的token比例（裁剪节省的比例）
-            saved_ratio = (1.0 - compression_ratio) * 100
             
             # 打印详细的采样决策信息
             logger.info(
@@ -161,7 +159,7 @@ class SimpleSmartSampler(SmartSampler):
                 "运动=%s(得分=%.3f) | "
                 "综合=%.3f | "
                 "来源=%s | "
-                "裁剪节省=%.1f%%",
+                "裁剪后比例=%.1f%%",
                 frame_idx,
                 ts,
                 change_result['ssim_score'],
@@ -170,7 +168,7 @@ class SimpleSmartSampler(SmartSampler):
                 motion_score,
                 change_result['combined_score'],
                 source,
-                saved_ratio
+                compression_ratio * 100
             )
             
             return result

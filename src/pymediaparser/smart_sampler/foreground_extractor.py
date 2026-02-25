@@ -11,9 +11,15 @@ logger = logging.getLogger(__name__)
 class ForegroundExtractor:
     """前景提取器 - 基于运动掩码提取前景区域"""
 
-    def __init__(self, padding_ratio: float = 0.1) -> None:
+    def __init__(self, padding_ratio: float = 0.2) -> None:
+        """初始化前景提取器。
+        
+        Args:
+            padding_ratio: 边缘扩展比例，相对于检测区域尺寸。
+                          例如 0.2 表示在四边各扩展检测区域宽/高的 20%。
+        """
         self.padding_ratio = padding_ratio
-        logger.debug("ForegroundExtractor 初始化完成")
+        logger.debug("ForegroundExtractor 初始化完成 - 边缘扩展比例: %.1f%%", padding_ratio * 100)
 
     def extract_foreground(self, frame: np.ndarray, mask: np.ndarray) -> Tuple[np.ndarray, Tuple[int, int, int, int]]:
         if frame is None or mask is None:
