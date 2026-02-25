@@ -163,15 +163,7 @@ class FrameValidator:
             self._last_pass_ts = timestamp
             self._last_pass_score = score
             self._pass_count += 1
-            # 将当前帧加入历史关键帧
-            self._reference_grays.append(gray_small.copy())
-
-        # 更新前一帧状态
-        self._prev_gray_small = gray_small
-        edges = cv2.Sobel(gray_small, cv2.CV_64F, 1, 0, ksize=3)
-        edges_y = cv2.Sobel(gray_small, cv2.CV_64F, 0, 1, ksize=3)
-        edge_mag = np.sqrt(edges ** 2 + edges_y ** 2)
-        self._prev_edges = (edge_mag > 50).astype(np.uint8)
+            # 参考帧状态更新由 update_reference() 统一完成
 
         # 过滤内部字段
         clean_features = {k: v for k, v in features.items() if not k.startswith('_')}
