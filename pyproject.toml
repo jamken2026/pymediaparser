@@ -27,6 +27,10 @@ vlm = [
     "transformers>=4.40",
     "qwen-vl-utils>=0.0.8",
 ]
+vlm-qwen3 = [
+    "transformers>=4.57.0",
+    "qwen-vl-utils>=0.0.8",
+]
 dev = [
     "pytest>=8.0",
 ]

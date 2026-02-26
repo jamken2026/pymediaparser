@@ -2,7 +2,7 @@
 
 包含：
 - vlm_base: VLM 配置/结果数据类与抽象接口
-- vlm_qwen2: Qwen2-VL 视觉语言模型推理
+- vlm: 多后端 VLM 推理子包（Qwen2-VL、Qwen3-VL、OpenAI API 等）
 - stream_reader: RTMP/HTTP-FLV/HTTP-TS 实时流接入
 - frame_sampler: 按频率抽帧
 - result_handler: 结果输出处理器
@@ -13,13 +13,17 @@
     # 方式 1：CLI 命令行直接运行
     # python -m pymediaparser.live_pipeline --url rtmp://host/live/stream --fps 1
 
-    # 方式 2：Python API
-    from pymediaparser import LivePipeline, StreamConfig, VLMConfig, Qwen2VLClient
+    # 方式 2：Python API（工厂模式）
+    from pymediaparser import LivePipeline, StreamConfig, VLMConfig, create_vlm_client
 
     stream_cfg = StreamConfig(url="rtmp://host/live/stream", target_fps=1.0)
-    vlm_client = Qwen2VLClient(VLMConfig(device="cuda:0"))
+    vlm_client = create_vlm_client("qwen2", VLMConfig(device="cuda:0"))
     pipeline = LivePipeline(stream_cfg, vlm_client)
     pipeline.run()
+
+    # 方式 3：直接实例化客户端
+    from pymediaparser import Qwen2VLClient, VLMConfig
+    client = Qwen2VLClient(VLMConfig(device="cuda:0"))
 """
 
 # 延迟导入：避免 python -m pymediaparser.live_pipeline 时的 RuntimeWarning
@@ -31,9 +35,18 @@ __all__ = [
     'VLMConfig',
     'VLMResult',
     'FrameResult',
-    # VLM 客户端（Qwen2VLClient已集成批量处理功能）
+    # VLM 客户端
     'VLMClient',
     'Qwen2VLClient',
+    'Qwen3VLClient',
+    'OpenAIAPIClient',
+    # VLM 配置
+    'LocalVLMConfig',
+    'APIVLMConfig',
+    # VLM 工厂
+    'create_vlm_client',
+    'register_vlm_backend',
+    'list_backends',
     # 流与采样
     'StreamReader',
     'FrameSampler',
@@ -64,12 +77,23 @@ def __getattr__(name: str):
         'VLMClient':             ('.vlm_base', 'VLMClient'),
         'StreamReader':          ('.stream_reader', 'StreamReader'),
         'FrameSampler':          ('.frame_sampler', 'FrameSampler'),
-        'Qwen2VLClient':         ('.vlm_qwen2', 'Qwen2VLClient'),
+        # VLM 客户端（从 vlm 子包加载）
+        'Qwen2VLClient':         ('.vlm.qwen2', 'Qwen2VLClient'),
+        'Qwen3VLClient':         ('.vlm.qwen3', 'Qwen3VLClient'),
+        'OpenAIAPIClient':       ('.vlm.openai_api', 'OpenAIAPIClient'),
+        # VLM 配置
+        'LocalVLMConfig':        ('.vlm.configs', 'LocalVLMConfig'),
+        'APIVLMConfig':          ('.vlm.configs', 'APIVLMConfig'),
+        # VLM 工厂
+        'create_vlm_client':     ('.vlm.factory', 'create_vlm_client'),
+        'register_vlm_backend':  ('.vlm.factory', 'register_vlm_backend'),
+        'list_backends':         ('.vlm.factory', 'list_backends'),
+        # 结果处理
         'ResultHandler':         ('.result_handler', 'ResultHandler'),
         'ConsoleResultHandler':  ('.result_handler', 'ConsoleResultHandler'),
         'HttpCallbackHandler':   ('.result_handler', 'HttpCallbackHandler'),
         'LivePipeline':          ('.live_pipeline', 'LivePipeline'),
-        # 新增智能采样相关
+        # 智能采样相关
         'SmartSampler':          ('.smart_sampler.base', 'SmartSampler'),
         'SimpleSmartSampler':    ('.smart_sampler.simple_smart_sampler', 'SimpleSmartSampler'),
         'MLSmartSampler':        ('.smart_sampler.ml_smart_sampler', 'MLSmartSampler'),

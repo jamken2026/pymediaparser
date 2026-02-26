@@ -32,7 +32,6 @@ class HardFilter:
         black_threshold: int = 10,
         white_threshold: int = 245,
         entropy_low: float = 3.0,
-        entropy_high: float = 7.5,
         size_change_tolerance: float = 0.05,
     ) -> None:
         self._min_frame_interval = min_frame_interval
@@ -40,7 +39,6 @@ class HardFilter:
         self._black_threshold = black_threshold
         self._white_threshold = white_threshold
         self._entropy_low = entropy_low
-        self._entropy_high = entropy_high
         self._size_tolerance = size_change_tolerance
 
         # 状态
@@ -52,10 +50,10 @@ class HardFilter:
 
         logger.debug(
             "HardFilter 初始化完成 - 最小间隔: %.1fs, 静止阈值: %.1f, "
-            "黑屏: <%d, 白屏: >%d, 熵: [%.1f, %.1f]",
+            "黑屏: <%d, 白屏: >%d, 熵下限: %.1f",
             min_frame_interval, still_threshold,
             black_threshold, white_threshold,
-            entropy_low, entropy_high,
+            entropy_low,
         )
 
     def check(self, frame: np.ndarray, timestamp: float) -> Tuple[bool, str]:
@@ -98,7 +96,9 @@ class HardFilter:
             self._reject_count += 1
             return False, '白屏'
 
-        # 4. 熵异常检测（直方图熵）
+        # 4. 熵异常检测（仅检测下限，上限无法区分高纹理场景与噪声）
+        # 注：高纹理的正常场景（人群、复杂背景）熵值可达 7.7-7.8，
+        #     而纯随机噪声约 7.6，熵上限检测会误伤有价值的帧。
         hist = cv2.calcHist([gray_small], [0], None, [256], [0, 256])
         hist = hist.flatten() / hist.sum()
         # 避免 log2(0)
@@ -108,10 +108,6 @@ class HardFilter:
             self._reject_count += 1
             logger.debug("熵值过低: %.2f < %.2f (画面单调)", entropy, self._entropy_low)
             return False, f'熵异常(过低:{entropy:.2f})'
-        if entropy > self._entropy_high:
-            self._reject_count += 1
-            logger.debug("熵值过高: %.2f > %.2f (疑似噪声)", entropy, self._entropy_high)
-            return False, f'熵异常(过高:{entropy:.2f})'
 
         # 5. 分辨率一致性
         h, w = frame.shape[:2]

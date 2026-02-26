@@ -2,23 +2,31 @@
 """媒体流解析启动脚本。
 
 从 RTMP / HTTP-FLV / HTTP-TS 实时流中按指定频率抽帧，
-送入 Qwen2-VL 大模型进行画面理解，并将结果输出到控制台。
+送入 VLM 大模型进行画面理解，并将结果输出到控制台。
 
 用法示例::
 
-    # RTMP 流，每秒 1 帧，使用 GPU 推理
+    # RTMP 流，每秒 1 帧，使用 GPU 推理（默认 Qwen2-VL）
     python scripts/run_parser.py --url rtmp://host/live/stream
+
+    # 使用 Qwen3-VL 后端
+    python scripts/run_parser.py \\
+        --url rtmp://host/live/stream \\
+        --vlm-backend qwen3 \\
+        --model-path /path/to/Qwen3-VL-2B
+
+    # 使用 OpenAI 兼容 API（vLLM / Ollama 等）
+    python scripts/run_parser.py \\
+        --url rtmp://host/live/stream \\
+        --vlm-backend openai_api \\
+        --api-base-url http://localhost:8000/v1 \\
+        --api-model Qwen2-VL-2B-Instruct
 
     # HTTP-FLV 流，每 2 秒 1 帧，自定义 prompt
     python scripts/run_parser.py \\
         --url http://host/live/stream.flv \\
         --fps 0.5 \\
         --prompt "识别画面中的人物并描述他们的行为。"
-
-    # HTTP-TS 流，指定模型路径
-    python scripts/run_parser.py \\
-        --url http://host/live/stream.ts \\
-        --model-path /path/to/Qwen2-VL-2B-Instruct
 
     # CPU 模式（无 GPU 时）
     python scripts/run_parser.py \\
@@ -39,20 +47,25 @@ if _SRC_DIR not in sys.path:
     sys.path.insert(0, _SRC_DIR)
 
 from pymediaparser.vlm_base import StreamConfig, VLMConfig
-from pymediaparser.vlm_qwen2 import Qwen2VLClient
+from pymediaparser.vlm.factory import create_vlm_client
+from pymediaparser.vlm.configs import APIVLMConfig
 from pymediaparser.result_handler import ConsoleResultHandler, HttpCallbackHandler
 from pymediaparser.live_pipeline import LivePipeline
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="实时流 VLM 分析 —— 拉取视频流、抽帧、Qwen2-VL 推理",
+        description="实时流 VLM 分析 —— 拉取视频流、抽帧、VLM 推理",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""\
 示例:
   %(prog)s --url rtmp://192.168.1.100/live/stream
   %(prog)s --url http://host/live/stream.flv --fps 0.5
   %(prog)s --url http://host/live/stream.ts --prompt "描述画面中的人物活动"
+  
+使用不同 VLM 后端:
+  %(prog)s --url rtmp://host/live/stream --vlm-backend qwen3 --model-path /path/to/Qwen3-VL-2B
+  %(prog)s --url rtmp://host/live/stream --vlm-backend openai_api --api-base-url http://localhost:8000/v1
   
 智能采样模式:
   %(prog)s --url rtmp://host/live/stream --smart-sampling
@@ -95,8 +108,12 @@ def parse_args() -> argparse.Namespace:
     # ── VLM 配置 ─────────────────────────────────────────────
     vlm_group = parser.add_argument_group("VLM 模型配置")
     vlm_group.add_argument(
+        "--vlm-backend", default="qwen3",
+        help="VLM 后端名称: qwen2 / qwen3 / openai_api（默认: qwen3）",
+    )
+    vlm_group.add_argument(
         "--model-path", default=None,
-        help="Qwen2-VL 模型本地路径（默认: 项目内置 models/Qwen/Qwen2-VL-2B-Instruct）",
+        help="本地模型路径（默认: 项目内置 models/Qwen/Qwen3-VL-2B-Instruct）",
     )
     vlm_group.add_argument(
         "--device", default="cuda:0",
@@ -118,6 +135,21 @@ def parse_args() -> argparse.Namespace:
     vlm_group.add_argument(
         "--no-flash-attn", action="store_true",
         help="禁用 Flash Attention 2",
+    )
+
+    # ── API 后端配置 ──────────────────────────────────────────
+    api_group = parser.add_argument_group("API 后端配置（--vlm-backend openai_api 时使用）")
+    api_group.add_argument(
+        "--api-base-url", default=None,
+        help="API 服务地址，如 http://localhost:8000/v1",
+    )
+    api_group.add_argument(
+        "--api-key", default=None,
+        help="API 密钥（本地服务通常不需要）",
+    )
+    api_group.add_argument(
+        "--api-model", default=None,
+        help="API 模型名称，如 Qwen2-VL-2B-Instruct",
     )
     
     # ── 智能抽帧配置 ─────────────────────────────────────────
@@ -201,20 +233,35 @@ def main() -> None:
         max_queue_size=args.queue_size,
     )
 
-    # ── 构建 VLMConfig ───────────────────────────────────────
-    vlm_kwargs = {
-        "device": args.device,
-        "dtype": args.dtype,
-        "max_new_tokens": args.max_tokens,
-        "use_flash_attn": not args.no_flash_attn,
-    }
-    if args.model_path:
-        vlm_kwargs["model_path"] = args.model_path
-    if args.prompt:
-        vlm_kwargs["default_prompt"] = args.prompt
-
-    vlm_cfg = VLMConfig(**vlm_kwargs)
-    vlm_client = Qwen2VLClient(vlm_cfg)
+    # ── 构建 VLM 客户端 ─────────────────────────────────────
+    backend = args.vlm_backend
+    if backend == "openai_api":
+        api_kwargs = {
+            "max_new_tokens": args.max_tokens,
+        }
+        if args.api_base_url:
+            api_kwargs["base_url"] = args.api_base_url
+        if args.api_key:
+            api_kwargs["api_key"] = args.api_key
+        if args.api_model:
+            api_kwargs["model_name"] = args.api_model
+        if args.prompt:
+            api_kwargs["default_prompt"] = args.prompt
+        vlm_cfg = APIVLMConfig(**api_kwargs)
+        vlm_client = create_vlm_client(backend, vlm_cfg)
+    else:
+        vlm_kwargs = {
+            "device": args.device,
+            "dtype": args.dtype,
+            "max_new_tokens": args.max_tokens,
+            "use_flash_attn": not args.no_flash_attn,
+        }
+        if args.model_path:
+            vlm_kwargs["model_path"] = args.model_path
+        if args.prompt:
+            vlm_kwargs["default_prompt"] = args.prompt
+        vlm_cfg = VLMConfig(**vlm_kwargs)
+        vlm_client = create_vlm_client(backend, vlm_cfg)
 
     # ── 构建 ResultHandler 列表 ───────────────────────────────
     handlers = []
@@ -233,8 +280,14 @@ def main() -> None:
     logger.info("=" * 50)
     logger.info("流地址:     %s", stream_cfg.url)
     logger.info("抽帧频率:   %.2f fps", stream_cfg.target_fps)
-    logger.info("推理设备:   %s", vlm_cfg.device)
-    logger.info("推理精度:   %s", vlm_cfg.dtype)
+    logger.info("VLM 后端:   %s", backend)
+    if backend == "openai_api":
+        logger.info("API 地址:   %s", vlm_cfg.base_url)
+        logger.info("API 模型:   %s", vlm_cfg.model_name)
+    else:
+        logger.info("推理设备:   %s", vlm_cfg.device)
+        logger.info("推理精度:   %s", vlm_cfg.dtype)
+        logger.info("模型路径:   %s", vlm_cfg.model_path)
     logger.info("最大 tokens: %d", vlm_cfg.max_new_tokens)
     logger.info("提示词:     %s", vlm_cfg.default_prompt)
     logger.info("队列大小:   %d", stream_cfg.max_queue_size)

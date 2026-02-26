@@ -28,7 +28,6 @@ from .frame_sampler import FrameSampler
 from .result_handler import ConsoleResultHandler, ResultHandler
 from .stream_reader import StreamReader
 from .vlm_base import FrameResult, StreamConfig, VLMClient, VLMConfig, VLMResult
-from .vlm_qwen2 import Qwen2VLClient
 
 # 智能功能导入（可选）
 try:
@@ -124,7 +123,6 @@ class LivePipeline:
             config = smart_config or {}
             self.frame_buffer = FrameBuffer(
                 max_size=config.get('batch_buffer_size', 5),
-                min_significant_frames=config.get('min_significant_frames', 2),
                 max_wait_time=config.get('batch_timeout', 2.0),
             )
 
@@ -327,12 +325,15 @@ class LivePipeline:
         1. 如果启用批处理，帧先入缓冲区
         2. 批次就绪时，调用 VLM 批量推理
         3. 未启用批处理时，直接单帧推理
+        4. 队列空时检查批处理超时，保证实时性
         """
         try:
             while not self._stop_event.is_set():
                 try:
                     item = self._queue.get(timeout=1.0)
                 except queue.Empty:
+                    # 队列空时，检查批处理缓冲区是否超时
+                    self._check_batch_timeout()
                     continue
 
                 # sentinel 检测
@@ -352,17 +353,49 @@ class LivePipeline:
         finally:
             logger.info("消费者线程已退出")
 
+    def _check_batch_timeout(self) -> None:
+        """检查批处理缓冲区是否超时，超时则触发处理。
+        
+        用于在队列空时主动检查，保证实时性。
+        """
+        if self.frame_buffer is None:
+            return
+        
+        batch_frames = self.frame_buffer.get_ready_batch()
+        if batch_frames is None:
+            return
+        
+        # 批次超时就绪，执行批量推理
+        logger.debug("[批处理超时] 缓冲区超时，触发批处理 - 帧数: %d", len(batch_frames))
+        vlm_result = self._process_batch(batch_frames)
+        if vlm_result is None:
+            return
+        
+        # 使用批次中最后一帧的元数据
+        last_frame = batch_frames[-1]
+        frame_result = FrameResult(
+            frame_index=last_frame['frame_index'],
+            timestamp=last_frame['timestamp'],
+            vlm_result=vlm_result,
+        )
+        
+        for handler in self.handlers:
+            try:
+                handler.handle(frame_result)
+            except Exception as exc:
+                logger.error("ResultHandler 异常: %s", exc)
+
     def _process_frame_item(self, item: Dict[str, Any]) -> None:
         """处理单个帧数据项。
         
         Args:
-            item: 帧数据字典，包含 image, timestamp, frame_index, significant 等
+            item: 帧数据字典，包含 image, timestamp, frame_index 等
         """
         image = item['image']
         ts = item['timestamp']
         idx = item['frame_index']
 
-        if self.frame_buffer:
+        if self.frame_buffer is not None:
             # 批处理模式：帧入缓冲区
             self.frame_buffer.add_frame(item)
             batch_frames = self.frame_buffer.get_ready_batch()
@@ -547,7 +580,7 @@ class LivePipeline:
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="实时流 VLM 分析 Pipeline —— 从 RTMP/HTTP-FLV/HTTP-TS 拉流，"
-                    "按频率抽帧并送入 Qwen2-VL 大模型进行理解。",
+                    "按频率抽帧并送入 VLM 大模型进行理解。",
     )
     # 流配置
     parser.add_argument("--url", required=True, help="流地址 (rtmp:// / http://*.flv / http://*.ts)")
@@ -557,11 +590,21 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--reconnect", type=float, default=3.0, help="断线重连间隔秒数 (默认 3.0)")
 
     # VLM 配置
-    parser.add_argument("--model-path", default=None, help="Qwen2-VL 模型路径 (默认项目内置)")
+    parser.add_argument("--model-path", default=None, help="VLM 模型路径 (默认项目内置)")
     parser.add_argument("--device", default="cuda:0", help="推理设备 (默认 cuda:0)")
     parser.add_argument("--dtype", default="float16", help="推理精度 (默认 float16)")
     parser.add_argument("--max-tokens", type=int, default=256, help="最大生成 token 数 (默认 256)")
     parser.add_argument("--prompt", default=None, help="VLM 提示词 (默认 '请描述当前画面中的人物活动。')")
+
+    # VLM 后端选择
+    parser.add_argument("--vlm-backend", default="qwen3",
+                        help="VLM 后端名称: qwen2 / qwen3 / openai_api (默认 qwen3)")
+    parser.add_argument("--api-base-url", default=None,
+                        help="API 服务地址 (用于 openai_api 后端)")
+    parser.add_argument("--api-key", default=None,
+                        help="API 密钥 (用于 openai_api 后端)")
+    parser.add_argument("--api-model", default=None,
+                        help="API 模型名称 (用于 openai_api 后端)")
 
     # 智能功能
     parser.add_argument("--smart-sampling", action="store_true", help="启用智能采样")
@@ -605,8 +648,26 @@ def main(argv: Sequence[str] | None = None) -> None:
     if args.prompt:
         vlm_kwargs["default_prompt"] = args.prompt
 
-    vlm_cfg = VLMConfig(**vlm_kwargs)
-    vlm_client = Qwen2VLClient(vlm_cfg)
+    # 根据后端类型创建客户端
+    from .vlm.factory import create_vlm_client
+
+    backend = args.vlm_backend
+    if backend == "openai_api":
+        from .vlm.configs import APIVLMConfig
+        api_kwargs: dict = {}
+        if args.api_base_url:
+            api_kwargs["base_url"] = args.api_base_url
+        if args.api_key:
+            api_kwargs["api_key"] = args.api_key
+        if args.api_model:
+            api_kwargs["model_name"] = args.api_model
+        if args.prompt:
+            api_kwargs["default_prompt"] = args.prompt
+        api_kwargs["max_new_tokens"] = args.max_tokens
+        vlm_client = create_vlm_client(backend, APIVLMConfig(**api_kwargs))
+    else:
+        vlm_cfg = VLMConfig(**vlm_kwargs)
+        vlm_client = create_vlm_client(backend, vlm_cfg)
 
     # 构建并运行 Pipeline
     pipeline = LivePipeline(
@@ -618,9 +679,9 @@ def main(argv: Sequence[str] | None = None) -> None:
     )
 
     logger.info(
-        "配置: url=%s  fps=%.1f  device=%s  dtype=%s  max_tokens=%d",
-        stream_cfg.url, stream_cfg.target_fps,
-        vlm_cfg.device, vlm_cfg.dtype, vlm_cfg.max_new_tokens,
+        "配置: url=%s  fps=%.1f  backend=%s  device=%s  dtype=%s  max_tokens=%d",
+        stream_cfg.url, stream_cfg.target_fps, backend,
+        args.device, args.dtype, args.max_tokens,
     )
 
     pipeline.run()

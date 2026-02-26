@@ -20,8 +20,11 @@ from PIL import Image
 
 _PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 DEFAULT_MODEL_PATH = os.environ.get(
-    "QWEN_VL_MODEL_PATH",
-    os.path.join(_PROJECT_ROOT, "models", "Qwen", "Qwen2-VL-2B-Instruct"),
+    "VLM_MODEL_PATH",
+    os.environ.get(
+        "QWEN_VL_MODEL_PATH",
+        os.path.join(_PROJECT_ROOT, "models", "Qwen", "Qwen3-VL-2B-Instruct"),
+    ),
 )
 
 
