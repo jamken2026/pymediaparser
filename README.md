@@ -125,7 +125,7 @@ pipeline = LivePipeline(
 )
 pipeline.run()
 ```
-
+ 
 ## 主要组件
 
 ### 流接入
