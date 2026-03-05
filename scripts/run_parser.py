@@ -1,13 +1,18 @@
 #!/usr/bin/env python3
 """媒体流解析启动脚本。
 
-从 RTMP / HTTP-FLV / HTTP-TS 实时流中按指定频率抽帧，
-送入 VLM 大模型进行画面理解，并将结果输出到控制台。
+支持两种运行模式：
+- live（默认）：从实时流（RTMP / HTTP-FLV / HTTP-TS）拉流抽帧分析
+- replay：从视频文件 / 图片文件读取并分析
 
 用法示例::
 
-    # RTMP 流，每秒 1 帧，使用 GPU 推理（默认 Qwen2-VL）
+    # 实时流模式（默认）
     python scripts/run_parser.py --url rtmp://host/live/stream
+
+    # 文件回放模式
+    python scripts/run_parser.py --mode replay --url /path/to/video.mp4
+    python scripts/run_parser.py --mode replay --url /path/to/image.jpg
 
     # 使用 Qwen3-VL 后端
     python scripts/run_parser.py \\
@@ -55,13 +60,18 @@ from pymediaparser.live_pipeline import LivePipeline
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="实时流 VLM 分析 —— 拉取视频流、抽帧、VLM 推理",
+        description="VLM 视频/图片分析 —— 支持实时流和文件回放两种模式",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""\
 示例:
-  %(prog)s --url rtmp://192.168.1.100/live/stream
-  %(prog)s --url http://host/live/stream.flv --fps 0.5
-  %(prog)s --url http://host/live/stream.ts --prompt "描述画面中的人物活动"
+  实时流模式（默认）:
+    %(prog)s --url rtmp://192.168.1.100/live/stream
+    %(prog)s --url http://host/live/stream.flv --fps 0.5
+  
+  文件回放模式:
+    %(prog)s --mode replay --url /path/to/video.mp4
+    %(prog)s --mode replay --url /path/to/image.jpg
+    %(prog)s --mode replay --url http://example.com/video.mp4
   
 使用不同 VLM 后端:
   %(prog)s --url rtmp://host/live/stream --vlm-backend qwen3 --model-path /path/to/Qwen3-VL-2B
@@ -77,11 +87,17 @@ def parse_args() -> argparse.Namespace:
 """,
     )
 
-    # ── 流配置 ──────────────────────────────────────────────
-    stream_group = parser.add_argument_group("流配置")
+    # ── 运行模式 ──────────────────────────────────────────────
+    parser.add_argument(
+        "--mode", default="live", choices=["live", "replay"],
+        help="运行模式: live=实时流 / replay=文件回放（默认: live）",
+    )
+
+    # ── 流/文件配置 ──────────────────────────────────────────
+    stream_group = parser.add_argument_group("流/文件配置")
     stream_group.add_argument(
         "--url", required=True,
-        help="视频流地址 (rtmp:// / http://*.flv / http://*.ts / *.m3u8)",
+        help="live: 流地址 (rtmp:// / http://*.flv 等); replay: 文件路径或URL (/path/to/video.mp4)",
     )
     stream_group.add_argument(
         "--format", default=None,
@@ -275,10 +291,17 @@ def main() -> None:
         handlers.append(ConsoleResultHandler(verbose=True))
 
     # ── 打印启动信息 ──────────────────────────────────────────
+    is_replay = args.mode == "replay"
     logger.info("=" * 50)
-    logger.info("实时流 VLM 分析")
+    if is_replay:
+        logger.info("文件回放 VLM 分析")
+    else:
+        logger.info("实时流 VLM 分析")
     logger.info("=" * 50)
-    logger.info("流地址:     %s", stream_cfg.url)
+    if is_replay:
+        logger.info("文件路径:   %s", stream_cfg.url)
+    else:
+        logger.info("流地址:     %s", stream_cfg.url)
     logger.info("抽帧频率:   %.2f fps", stream_cfg.target_fps)
     logger.info("VLM 后端:   %s", backend)
     if backend == "openai_api":
@@ -291,12 +314,13 @@ def main() -> None:
     logger.info("最大 tokens: %d", vlm_cfg.max_new_tokens)
     logger.info("提示词:     %s", vlm_cfg.default_prompt)
     logger.info("队列大小:   %d", stream_cfg.max_queue_size)
-    if args.callback_url:
+    if not is_replay and args.callback_url:
+        logger.info("HTTP 回调:  %s", args.callback_url)
+    elif args.callback_url:
         logger.info("HTTP 回调:  %s", args.callback_url)
     logger.info("=" * 50)
 
     # ── 构建 Pipeline ────────────────────────────────────────
-    # 统一使用 LivePipeline，通过参数控制模式
     smart_config = None
     if args.smart_sampling or args.batch_processing:
         smart_config = {
@@ -307,42 +331,87 @@ def main() -> None:
             'batch_buffer_size': args.batch_buffer_size,
             'batch_timeout': args.batch_timeout,
         }
-    
-    pipeline = LivePipeline(
-        stream_config=stream_cfg,
-        vlm_client=vlm_client,
-        handlers=handlers,
-        prompt=args.prompt,
-        enable_smart_sampling=args.smart_sampling,
-        enable_batch_processing=args.batch_processing,
-        smart_config=smart_config,
-    )
+
+    if is_replay:
+        # 文件回放模式
+        from pymediaparser.replay_pipeline import ReplayPipeline
+        pipeline = ReplayPipeline(
+            stream_config=stream_cfg,
+            vlm_client=vlm_client,
+            handlers=handlers,
+            prompt=args.prompt,
+            enable_smart_sampling=args.smart_sampling,
+            enable_batch_processing=args.batch_processing,
+            smart_config=smart_config,
+        )
+    else:
+        # 实时流模式
+        pipeline = LivePipeline(
+            stream_config=stream_cfg,
+            vlm_client=vlm_client,
+            handlers=handlers,
+            prompt=args.prompt,
+            enable_smart_sampling=args.smart_sampling,
+            enable_batch_processing=args.batch_processing,
+            smart_config=smart_config,
+        )
     
     # 显示运行模式信息
-    if args.smart_sampling or args.batch_processing:
+    if is_replay:
+        mode_parts = ["文件回放"]
+        if args.smart_sampling:
+            mode_parts.append("智能采样")
+        if args.batch_processing:
+            mode_parts.append("批量处理")
+        logger.info("运行模式:   %s", "+".join(mode_parts))
+    elif args.smart_sampling or args.batch_processing:
         mode_info = []
         if args.smart_sampling:
             mode_info.append("智能采样")
         if args.batch_processing:
             mode_info.append("批量处理")
         logger.info("运行模式:   %s", "+".join(mode_info))
-        
-        if args.smart_sampling:
-            logger.info("运动检测:   %s", args.motion_method)
-            logger.info("运动阈值:   %.2f", args.motion_threshold)
-            logger.info("保底间隔:   %.1f秒", args.backup_interval)
-            logger.info("最小帧间隔: %.1f秒", args.min_frame_interval)
-        if args.batch_processing:
-            logger.info("批缓冲区:   %d", args.batch_buffer_size)
-            logger.info("批超时:     %.1f秒", args.batch_timeout)
     else:
         logger.info("运行模式:   传统固定频率抽帧")
+
+    # 显示智能功能详情
+    if args.smart_sampling:
+        logger.info("运动检测:   %s", args.motion_method)
+        logger.info("运动阈值:   %.2f", args.motion_threshold)
+        logger.info("保底间隔:   %.1f秒", args.backup_interval)
+        logger.info("最小帧间隔: %.1f秒", args.min_frame_interval)
+    if args.batch_processing:
+        logger.info("批缓冲区:   %d", args.batch_buffer_size)
+        logger.info("批超时:     %.1f秒", args.batch_timeout)
 
     logger.info("=" * 50)
     
     # ── 运行 Pipeline ────────────────────────────────────────
     pipeline.run()
 
+    # ── 显式清理资源，避免程序退出时 C++ 析构异常 ─────────────
+    # 问题：PyTorch/transformers 在程序退出时可能抛出
+    # "terminate called without an active exception"
+    del pipeline
+    del vlm_client
+    handlers.clear()
+
+    # 确保 CUDA 资源完全释放
+    try:
+        import torch
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+            torch.cuda.empty_cache()
+    except ImportError:
+        pass
+
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        # 强制立即退出，跳过所有 Python/C++ 清理过程
+        # 避免 PyTorch CUDA 析构时的 "terminate called" 错误
+        os._exit(0)

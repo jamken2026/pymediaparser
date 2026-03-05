@@ -16,8 +16,9 @@
 from __future__ import annotations
 
 import logging
+import threading
 import time
-from typing import Iterator
+from typing import Iterator, Optional
 
 import av
 import numpy as np
@@ -55,11 +56,13 @@ class FrameSampler:
     def sample(
         self,
         frames: Iterator[tuple[av.VideoFrame, float]],
+        stop_event: Optional[threading.Event] = None,
     ) -> Iterator[tuple[Image.Image, float, int]]:
         """从帧流中按时间间隔抽取帧。
 
         Args:
             frames: 上游帧迭代器，每个元素为 ``(av.VideoFrame, timestamp_seconds)``。
+            stop_event: 可选的停止事件，设置时提前终止采样。
 
         Yields:
             ``(pil_image, timestamp_seconds, frame_index)`` 三元组。
@@ -69,6 +72,9 @@ class FrameSampler:
             - ``frame_index``: 该帧在本次采样中的全局序号（从 0 开始）。
         """
         for frame, ts in frames:
+            # 检查停止信号
+            if stop_event is not None and stop_event.is_set():
+                return
             if self._should_emit(ts):
                 image = self._frame_to_pil(frame)
                 idx = self._frame_count

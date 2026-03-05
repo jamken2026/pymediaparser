@@ -4,14 +4,19 @@
 - vlm_base: VLM 配置/结果数据类与抽象接口
 - vlm: 多后端 VLM 推理子包（Qwen2-VL、Qwen3-VL、OpenAI API 等）
 - stream_reader: RTMP/HTTP-FLV/HTTP-TS 实时流接入
+- file_reader: 视频/图片文件读取
 - frame_sampler: 按频率抽帧
 - result_handler: 结果输出处理器
 - live_pipeline: 实时流 VLM 分析 Pipeline
+- replay_pipeline: 文件回放 VLM 分析 Pipeline
 
 使用示例::
 
     # 方式 1：CLI 命令行直接运行
-    # python -m pymediaparser.live_pipeline --url rtmp://host/live/stream --fps 1
+    # 实时流模式
+    # python scripts/run_parser.py --url rtmp://host/live/stream --fps 1
+    # 文件回放模式
+    # python scripts/run_parser.py --mode replay --url /path/to/video.mp4
 
     # 方式 2：Python API（工厂模式）
     from pymediaparser import LivePipeline, StreamConfig, VLMConfig, create_vlm_client
@@ -21,9 +26,13 @@
     pipeline = LivePipeline(stream_cfg, vlm_client)
     pipeline.run()
 
-    # 方式 3：直接实例化客户端
-    from pymediaparser import Qwen2VLClient, VLMConfig
-    client = Qwen2VLClient(VLMConfig(device="cuda:0"))
+    # 方式 3：文件回放
+    from pymediaparser import ReplayPipeline, StreamConfig, create_vlm_client
+
+    cfg = StreamConfig(url="/path/to/video.mp4", target_fps=1.0)
+    vlm_client = create_vlm_client("openai_api", api_cfg)
+    pipeline = ReplayPipeline(cfg, vlm_client)
+    pipeline.run()
 """
 
 # 延迟导入：避免 python -m pymediaparser.live_pipeline 时的 RuntimeWarning
@@ -49,6 +58,7 @@ __all__ = [
     'list_backends',
     # 流与采样
     'StreamReader',
+    'FileReader',
     'FrameSampler',
     'SmartSampler',
     'SimpleSmartSampler',
@@ -64,6 +74,7 @@ __all__ = [
     'HttpCallbackHandler',
     # Pipeline（统一入口，支持传统/智能双模式）
     'LivePipeline',
+    'ReplayPipeline',
 ]
 
 
@@ -76,6 +87,7 @@ def __getattr__(name: str):
         'FrameResult':           ('.vlm_base', 'FrameResult'),
         'VLMClient':             ('.vlm_base', 'VLMClient'),
         'StreamReader':          ('.stream_reader', 'StreamReader'),
+        'FileReader':            ('.file_reader', 'FileReader'),
         'FrameSampler':          ('.frame_sampler', 'FrameSampler'),
         # VLM 客户端（从 vlm 子包加载）
         'Qwen2VLClient':         ('.vlm.qwen2', 'Qwen2VLClient'),
@@ -93,6 +105,7 @@ def __getattr__(name: str):
         'ConsoleResultHandler':  ('.result_handler', 'ConsoleResultHandler'),
         'HttpCallbackHandler':   ('.result_handler', 'HttpCallbackHandler'),
         'LivePipeline':          ('.live_pipeline', 'LivePipeline'),
+        'ReplayPipeline':        ('.replay_pipeline', 'ReplayPipeline'),
         # 智能采样相关
         'SmartSampler':          ('.smart_sampler.base', 'SmartSampler'),
         'SimpleSmartSampler':    ('.smart_sampler.simple_smart_sampler', 'SimpleSmartSampler'),
