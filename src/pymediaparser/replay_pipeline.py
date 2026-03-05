@@ -113,7 +113,7 @@ class ReplayPipeline:
             config = smart_config or {}
             self.frame_buffer = FrameBuffer(
                 max_size=config.get('batch_buffer_size', 5),
-                max_wait_time=config.get('batch_timeout', 2.0),
+                max_wait_time=config.get('batch_timeout', 5.0),
             )
 
         # 队列配置（与 LivePipeline 结构一致）
@@ -326,7 +326,6 @@ class ReplayPipeline:
                 try:
                     item = self._queue.get(timeout=1.0)
                 except queue.Empty:
-                    self._check_batch_timeout()
                     continue
 
                 # sentinel 检测
@@ -350,43 +349,16 @@ class ReplayPipeline:
             self._done_event.set()
             logger.info("消费者线程已退出")
 
-    def _check_batch_timeout(self) -> None:
-        """检查批处理缓冲区是否超时，超时则触发处理。"""
-        if self.frame_buffer is None:
-            return
-
-        batch_frames = self.frame_buffer.get_ready_batch()
-        if batch_frames is None:
-            return
-
-        logger.debug("[批处理超时] 缓冲区超时，触发批处理 - 帧数: %d", len(batch_frames))
-        vlm_result = self._process_batch(batch_frames)
-        if vlm_result is None:
-            return
-
-        last_frame = batch_frames[-1]
-        frame_result = FrameResult(
-            frame_index=last_frame['frame_index'],
-            timestamp=last_frame['timestamp'],
-            vlm_result=vlm_result,
-        )
-
-        for handler in self.handlers:
-            try:
-                handler.handle(frame_result)
-            except Exception as exc:
-                logger.error("ResultHandler 异常: %s", exc)
-
     def _process_frame_item(self, item: Dict[str, Any]) -> None:
         """处理单个帧数据项。"""
         image = item['image']
         ts = item['timestamp']
         idx = item['frame_index']
+        batch_count = 0  # 批处理帧数
 
         if self.frame_buffer is not None:
-            # 批处理模式
-            self.frame_buffer.add_frame(item)
-            batch_frames = self.frame_buffer.get_ready_batch()
+            # 批处理模式：add_frame 返回就绪的批次
+            batch_frames = self.frame_buffer.add_frame(item)
             if batch_frames is None:
                 return
 
@@ -397,9 +369,12 @@ class ReplayPipeline:
             last_frame = batch_frames[-1]
             ts = last_frame['timestamp']
             idx = last_frame['frame_index']
+            batch_count = len(batch_frames)
+            item = last_frame  # 使用最后一帧记录进度
         else:
             # 单帧推理
             vlm_result = self.vlm_client.analyze(image, self.prompt)
+            batch_count = 1
 
         if vlm_result is None:
             return
@@ -421,7 +396,7 @@ class ReplayPipeline:
                 logger.error("ResultHandler 异常: %s", exc)
 
         # 进度跟踪
-        self._processed_count += 1
+        self._processed_count += batch_count
         self._log_progress(item)
 
     def _log_progress(self, item: Dict[str, Any]) -> None:
@@ -512,6 +487,10 @@ class ReplayPipeline:
                     except Exception as exc:
                         logger.error("ResultHandler 异常: %s", exc)
 
+                # 进度跟踪
+                self._processed_count += len(batch_frames)
+                self._log_progress(last_frame)
+
     # ------------------------------------------------------------------
     # 处理器线程（智能模式专用）
     # ------------------------------------------------------------------
@@ -560,11 +539,8 @@ class ReplayPipeline:
     def _enqueue_frame(self, frame_data: Optional[Dict[str, Any]]) -> None:
         """将帧数据阻塞入队到主队列（不丢帧）。"""
         if frame_data is None:
-            # sentinel：用短超时尝试入队
-            try:
-                self._queue.put(None, timeout=1.0)
-            except queue.Full:
-                pass
+            # sentinel：使用阻塞式发送，确保一定能送达
+            self._blocking_put(self._queue, None)
             return
 
         self._blocking_put(self._queue, frame_data)

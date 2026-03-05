@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 import logging
-import time
 from typing import List, Dict, Any, Optional
 from dataclasses import dataclass
 from collections import deque
@@ -11,12 +10,9 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class BufferedFrame:
+    """缓冲帧数据结构"""
     frame_data: Dict[str, Any]
     timestamp: float
-    added_time: float
-    
-    def __post_init__(self):
-        self.added_time = time.time()
 
 
 class FrameBuffer:
@@ -24,66 +20,75 @@ class FrameBuffer:
     
     触发条件：
     1. 缓冲区满（帧数 >= max_size）
-    2. 超时（等待时间 >= max_wait_time）
+    2. 帧时间戳跨度超限（跨度 >= max_wait_time）
+    
+    时间戳跨度：使用帧自身的相对时间戳计算，适用于实时流和回放场景。
+    
+    时序逻辑：
+    - 新帧到达时，先预判入队后的时间跨度
+    - 若跨度超限，先返回当前批次，再将新帧入队
+    - 确保同一批次内的帧时间连续，便于大模型理解
     """
 
-    def __init__(self, max_size: int = 5, max_wait_time: float = 2.0) -> None:
+    def __init__(self, max_size: int = 5, max_wait_time: float = 5.0) -> None:
         self.max_size = max_size
         self.max_wait_time = max_wait_time
         self.buffer: deque[BufferedFrame] = deque(maxlen=max_size)
-        # 第一帧入队时间，用于计算等待超时；None 表示缓冲区为空
-        self._first_frame_time: Optional[float] = None
         logger.debug("FrameBuffer 初始化完成 - max_size=%d, max_wait_time=%.1fs", 
                     max_size, max_wait_time)
 
-    def add_frame(self, frame_data: Dict[str, Any]) -> None:
-        """添加帧到缓冲区"""
+    def add_frame(self, frame_data: Dict[str, Any]) -> Optional[List[Dict[str, Any]]]:
+        """添加帧到缓冲区，返回就绪的批次（如果有）
+        
+        时序逻辑：
+        1. 预判新帧入队后的时间跨度
+        2. 若跨度超限，先返回当前批次
+        3. 新帧入队
+        4. 检查缓冲区是否满
+        
+        Args:
+            frame_data: 帧数据字典，需包含 'timestamp' 字段
+            
+        Returns:
+            就绪的帧批次，或 None（继续等待）
+        """
         if not frame_data:
-            return
+            return None
+        
+        new_timestamp = frame_data.get('timestamp', 0.0)
+        batch_to_return = None
+        
+        # 预判：如果新帧入队后时间跨度会超限，先返回当前批次
+        if self.buffer:
+            first_timestamp = self.buffer[0].timestamp
+            predicted_span = new_timestamp - first_timestamp
             
-        # 第一帧入队时记录时间
-        if not self.buffer:
-            self._first_frame_time = time.time()
-            
+            if predicted_span >= self.max_wait_time:
+                # 新帧会导致时间跨度超限 → 先返回当前批次
+                batch_to_return = self._prepare_batch()
+                logger.info(
+                    "[FrameBuffer] 时间跨度超限，先输出批次 - 跨度: %.2fs, 批次帧数: %d",
+                    predicted_span, len(batch_to_return) if batch_to_return else 0
+                )
+        
+        # 新帧入队
         buffered_frame = BufferedFrame(
             frame_data=frame_data,
-            timestamp=frame_data.get('timestamp', time.time()),
-            added_time=time.time()
+            timestamp=new_timestamp,
         )
-        
         self.buffer.append(buffered_frame)
         logger.debug("帧已添加到缓冲区 - 大小: %d/%d", len(self.buffer), self.max_size)
-
-    def get_ready_batch(self) -> Optional[List[Dict[str, Any]]]:
-        """检查是否满足批处理条件，返回就绪的帧批次"""
-        if not self.buffer:
-            logger.debug("[FrameBuffer] 缓冲区为空，无法批处理")
-            return None
-            
-        current_time = time.time()
-        first_frame_time = self._first_frame_time or current_time
-        time_elapsed = current_time - first_frame_time
         
-        # 触发条件：缓冲区满 或 超时
-        should_process = (
-            len(self.buffer) >= self.max_size or
-            time_elapsed >= self.max_wait_time
-        )
+        # 如果上面已返回批次，这里不再检查（新帧刚入队，大概率不满）
+        if batch_to_return is not None:
+            return batch_to_return
         
-        logger.debug(
-            "[FrameBuffer] 批处理检查 - 缓冲区: %d/%d, 等待时间: %.1f/%.1fs",
-            len(self.buffer), self.max_size, time_elapsed, self.max_wait_time
-        )
-        
-        if should_process:
+        # 检查缓冲区是否满
+        if len(self.buffer) >= self.max_size:
             batch = self._prepare_batch()
-            # 缓冲区已清空，重置第一帧时间
-            self._first_frame_time = None
-            
-            logger.info("准备批处理 - 总帧数: %d, 等待时间: %.1fs", len(batch), time_elapsed)
+            logger.info("[FrameBuffer] 缓冲区满，输出批次 - 帧数: %d", len(batch))
             return batch
         
-        logger.debug("[FrameBuffer] 批处理条件未满足，继续等待")
         return None
 
     def _prepare_batch(self) -> List[Dict[str, Any]]:
@@ -95,23 +100,21 @@ class FrameBuffer:
     def clear(self) -> None:
         """清空缓冲区"""
         self.buffer.clear()
-        self._first_frame_time = None
         logger.info("帧缓冲区已清空")
 
     def get_status(self) -> Dict[str, Any]:
         """获取缓冲区状态"""
         if not self.buffer:
-            return {'size': 0, 'ready': False}
-            
-        first_frame_time = self._first_frame_time or time.time()
-        time_waiting = time.time() - first_frame_time
+            return {'size': 0, 'ready': False, 'timestamp_span': 0.0}
+        
+        timestamp_span = self.buffer[-1].timestamp - self.buffer[0].timestamp
         
         return {
             'size': len(self.buffer),
             'max_size': self.max_size,
-            'time_waiting': time_waiting,
+            'timestamp_span': timestamp_span,
             'max_wait_time': self.max_wait_time,
-            'ready': len(self.buffer) >= self.max_size or time_waiting >= self.max_wait_time,
+            'ready': len(self.buffer) >= self.max_size or timestamp_span >= self.max_wait_time,
         }
 
     def flush(self) -> Optional[List[Dict[str, Any]]]:

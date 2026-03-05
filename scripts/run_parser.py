@@ -203,8 +203,8 @@ def parse_args() -> argparse.Namespace:
         help="批量处理缓冲区大小（默认: 5）",
     )
     batch_group.add_argument(
-        "--batch-timeout", type=float, default=2.0,
-        help="批量处理超时时间（秒，默认: 2.0）",
+        "--batch-timeout", type=float, default=5.0,
+        help="批量处理帧时间戳最大跨度（秒，默认: 5.0）",
     )
 
     # ── 输出配置 ─────────────────────────────────────────────
@@ -382,7 +382,7 @@ def main() -> None:
         logger.info("最小帧间隔: %.1f秒", args.min_frame_interval)
     if args.batch_processing:
         logger.info("批缓冲区:   %d", args.batch_buffer_size)
-        logger.info("批超时:     %.1f秒", args.batch_timeout)
+        logger.info("帧时间戳跨度上限: %.1f秒", args.batch_timeout)
 
     logger.info("=" * 50)
     

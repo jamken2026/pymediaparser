@@ -123,7 +123,7 @@ class LivePipeline:
             config = smart_config or {}
             self.frame_buffer = FrameBuffer(
                 max_size=config.get('batch_buffer_size', 5),
-                max_wait_time=config.get('batch_timeout', 2.0),
+                max_wait_time=config.get('batch_timeout', 5.0),
             )
 
         # 队列配置
@@ -325,15 +325,12 @@ class LivePipeline:
         1. 如果启用批处理，帧先入缓冲区
         2. 批次就绪时，调用 VLM 批量推理
         3. 未启用批处理时，直接单帧推理
-        4. 队列空时检查批处理超时，保证实时性
         """
         try:
             while not self._stop_event.is_set():
                 try:
                     item = self._queue.get(timeout=1.0)
                 except queue.Empty:
-                    # 队列空时，检查批处理缓冲区是否超时
-                    self._check_batch_timeout()
                     continue
 
                 # sentinel 检测
@@ -353,38 +350,6 @@ class LivePipeline:
         finally:
             logger.info("消费者线程已退出")
 
-    def _check_batch_timeout(self) -> None:
-        """检查批处理缓冲区是否超时，超时则触发处理。
-        
-        用于在队列空时主动检查，保证实时性。
-        """
-        if self.frame_buffer is None:
-            return
-        
-        batch_frames = self.frame_buffer.get_ready_batch()
-        if batch_frames is None:
-            return
-        
-        # 批次超时就绪，执行批量推理
-        logger.debug("[批处理超时] 缓冲区超时，触发批处理 - 帧数: %d", len(batch_frames))
-        vlm_result = self._process_batch(batch_frames)
-        if vlm_result is None:
-            return
-        
-        # 使用批次中最后一帧的元数据
-        last_frame = batch_frames[-1]
-        frame_result = FrameResult(
-            frame_index=last_frame['frame_index'],
-            timestamp=last_frame['timestamp'],
-            vlm_result=vlm_result,
-        )
-        
-        for handler in self.handlers:
-            try:
-                handler.handle(frame_result)
-            except Exception as exc:
-                logger.error("ResultHandler 异常: %s", exc)
-
     def _process_frame_item(self, item: Dict[str, Any]) -> None:
         """处理单个帧数据项。
         
@@ -396,9 +361,8 @@ class LivePipeline:
         idx = item['frame_index']
 
         if self.frame_buffer is not None:
-            # 批处理模式：帧入缓冲区
-            self.frame_buffer.add_frame(item)
-            batch_frames = self.frame_buffer.get_ready_batch()
+            # 批处理模式：add_frame 返回就绪的批次
+            batch_frames = self.frame_buffer.add_frame(item)
             if batch_frames is None:
                 return  # 等待更多帧
             

@@ -173,7 +173,6 @@ finally:
 - `_process_batch()` - 批量推理
 - `_build_batch_prompt()` - 批处理提示词
 - `_flush_batch_buffer()` - 清空缓冲区
-- `_check_batch_timeout()` - 批处理超时检查
 - `_processor_loop()` - 处理器主循环（`_enqueue_frame` 改为阻塞版本）
 - `_numpy_to_pil()` - 格式转换
 

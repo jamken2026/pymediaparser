@@ -78,11 +78,11 @@ def demo_traditional_vs_smart():
         motion_method="MOG2",
         ssim_threshold=0.85,
         batch_buffer_size=5,
-        batch_timeout=2.0
+        batch_timeout=5.0
     )
     print("✅ 配置完成 - 智能采样 + 批量处理")
     print(f"   批缓冲区: {full_smart_pipeline.batch_processor.frame_buffer.max_size}")
-    print(f"   批超时: {full_smart_pipeline.batch_processor.frame_buffer.max_wait_time}秒")
+    print(f"   帧时间戳跨度上限: {full_smart_pipeline.batch_processor.frame_buffer.max_wait_time}秒")
     
     print("\n" + "=" * 60)
     print("🎯 性能优化预期:")
