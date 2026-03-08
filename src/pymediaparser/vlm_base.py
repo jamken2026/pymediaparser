@@ -43,6 +43,7 @@ class StreamConfig:
         reconnect_interval: 断线后等待重连秒数。
         timeout: 读取超时秒数。
         max_queue_size: 帧缓冲队列最大长度（超出时丢弃旧帧）。
+        decode_mode: 解码模式。"all"=全帧解码，"keyframe_only"=仅解码关键帧(I帧)。
     """
 
     url: str
@@ -51,6 +52,7 @@ class StreamConfig:
     reconnect_interval: float = 3.0
     timeout: float = 10.0
     max_queue_size: int = 3
+    decode_mode: str = "all"  # "all" | "keyframe_only"
 
 
 @dataclass

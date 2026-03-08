@@ -185,9 +185,11 @@ class ReplayPipeline:
 
         mode_str = "智能模式" if self.enable_smart_sampling else "传统模式"
         batch_str = "启用批处理" if self.enable_batch_processing else "单帧处理"
+        decode_mode_str = "仅关键帧" if self.stream_config.decode_mode == "keyframe_only" else "全帧解码"
         logger.info(
-            "回放 Pipeline 已启动 [%s, %s] file=%s fps=%.1f",
-            mode_str, batch_str, self.stream_config.url, self.stream_config.target_fps,
+            "回放 Pipeline 已启动 [%s, %s, %s] file=%s fps=%.1f",
+            mode_str, batch_str, decode_mode_str,
+            self.stream_config.url, self.stream_config.target_fps,
         )
 
     def stop(self) -> None:

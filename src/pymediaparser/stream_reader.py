@@ -92,6 +92,10 @@ class StreamReader:
                 # 不进行线程级解码（实时流通常不需要）
                 stream.thread_type = "AUTO"
 
+                # 设置解码模式
+                if self.config.decode_mode == "keyframe_only":
+                    stream.codec_context.skip_frame = "NONKEY"
+
                 for frame in self._container.decode(video=0):
                     ts = self._frame_timestamp(frame)
                     yield frame, ts

@@ -197,9 +197,11 @@ class LivePipeline:
 
         mode_str = "智能模式" if self.enable_smart_sampling else "传统模式"
         batch_str = "启用批处理" if self.enable_batch_processing else "单帧处理"
+        decode_mode_str = "仅关键帧" if self.stream_config.decode_mode == "keyframe_only" else "全帧解码"
         logger.info(
-            "Pipeline 已启动 [%s, %s] url=%s fps=%.1f",
-            mode_str, batch_str, self.stream_config.url, self.stream_config.target_fps,
+            "Pipeline 已启动 [%s, %s, %s] url=%s fps=%.1f",
+            mode_str, batch_str, decode_mode_str,
+            self.stream_config.url, self.stream_config.target_fps,
         )
 
     def stop(self) -> None:
@@ -552,6 +554,11 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--fps", type=float, default=1.0, help="目标抽帧频率 (默认 1.0)")
     parser.add_argument("--queue-size", type=int, default=3, help="帧缓冲队列大小 (默认 3)")
     parser.add_argument("--reconnect", type=float, default=3.0, help="断线重连间隔秒数 (默认 3.0)")
+    parser.add_argument(
+        "--decode-mode", default="all",
+        choices=["all", "keyframe_only"],
+        help="解码模式: all=全帧解码 / keyframe_only=仅解码关键帧 (默认 all)",
+    )
 
     # VLM 配置
     parser.add_argument("--model-path", default=None, help="VLM 模型路径 (默认项目内置)")
@@ -600,6 +607,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         target_fps=args.fps,
         reconnect_interval=args.reconnect,
         max_queue_size=args.queue_size,
+        decode_mode=args.decode_mode,
     )
 
     vlm_kwargs: dict = {

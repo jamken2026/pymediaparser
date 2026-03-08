@@ -214,6 +214,11 @@ class FileReader:
         video_stream = self._container.streams.video[0]
         video_stream.thread_type = "AUTO"
 
+        # 设置解码模式
+        if self.config.decode_mode == "keyframe_only":
+            video_stream.codec_context.skip_frame = "NONKEY"
+            logger.info("解码模式: 仅关键帧(I帧)")
+
         # 总帧数（某些容器格式可能返回 0）
         self._total_frames = video_stream.frames or 0
 

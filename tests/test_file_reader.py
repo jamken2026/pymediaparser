@@ -303,3 +303,58 @@ class TestFileReaderWithFrameSampler:
             assert isinstance(image, Image.Image)
             assert ts == 0.0
             assert idx == 0
+
+
+@skip_if_no_video
+class TestFileReaderKeyframeOnly:
+    """FileReader 关键帧解码模式测试。"""
+
+    def test_keyframe_only_mode(self):
+        """仅关键帧模式：解码的帧都是关键帧。"""
+        from pymediaparser.file_reader import FileReader
+        from pymediaparser.vlm_base import StreamConfig
+
+        cfg = StreamConfig(url=_VIDEO_FILE, decode_mode="keyframe_only")
+        with FileReader(cfg) as reader:
+            frame_count = 0
+            for frame, ts in reader.frames():
+                # 所有解码的帧应该是关键帧
+                assert frame.key_frame is True
+                assert isinstance(ts, float)
+                frame_count += 1
+                if frame_count >= 5:  # 只测试前 5 帧
+                    break
+
+            assert frame_count > 0
+
+    def test_keyframe_only_fewer_frames_than_all(self):
+        """仅关键帧模式的帧数应少于或等于全帧模式。"""
+        from pymediaparser.file_reader import FileReader
+        from pymediaparser.vlm_base import StreamConfig
+
+        # 全帧模式
+        cfg_all = StreamConfig(url=_VIDEO_FILE, decode_mode="all")
+        with FileReader(cfg_all) as reader:
+            frames_all = list(reader.frames())
+
+        # 仅关键帧模式
+        cfg_keyframe = StreamConfig(url=_VIDEO_FILE, decode_mode="keyframe_only")
+        with FileReader(cfg_keyframe) as reader:
+            frames_keyframe = list(reader.frames())
+
+        # 关键帧数应 <= 全帧数
+        assert len(frames_keyframe) <= len(frames_all)
+
+    def test_keyframe_only_timestamps_valid(self):
+        """仅关键帧模式的时间戳应有效。"""
+        from pymediaparser.file_reader import FileReader
+        from pymediaparser.vlm_base import StreamConfig
+
+        cfg = StreamConfig(url=_VIDEO_FILE, decode_mode="keyframe_only")
+        with FileReader(cfg) as reader:
+            prev_ts = -1.0
+            for frame, ts in reader.frames():
+                # 时间戳应单调递增
+                assert ts >= prev_ts
+                prev_ts = ts
+

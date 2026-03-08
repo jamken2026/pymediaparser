@@ -120,6 +120,11 @@ def parse_args() -> argparse.Namespace:
         "--timeout", type=float, default=10.0,
         help="流读取超时秒数（默认: 10.0）",
     )
+    stream_group.add_argument(
+        "--decode-mode", default="all",
+        choices=["all", "keyframe_only"],
+        help="解码模式: all=全帧解码 / keyframe_only=仅解码关键帧（默认: all）",
+    )
 
     # ── VLM 配置 ─────────────────────────────────────────────
     vlm_group = parser.add_argument_group("VLM 模型配置")
@@ -247,6 +252,7 @@ def main() -> None:
         reconnect_interval=args.reconnect,
         timeout=args.timeout,
         max_queue_size=args.queue_size,
+        decode_mode=args.decode_mode,
     )
 
     # ── 构建 VLM 客户端 ─────────────────────────────────────
@@ -314,6 +320,7 @@ def main() -> None:
     logger.info("最大 tokens: %d", vlm_cfg.max_new_tokens)
     logger.info("提示词:     %s", vlm_cfg.default_prompt)
     logger.info("队列大小:   %d", stream_cfg.max_queue_size)
+    logger.info("解码模式:   %s", "仅关键帧" if stream_cfg.decode_mode == "keyframe_only" else "全帧解码")
     if not is_replay and args.callback_url:
         logger.info("HTTP 回调:  %s", args.callback_url)
     elif args.callback_url:
