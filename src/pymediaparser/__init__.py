@@ -44,6 +44,9 @@ __all__ = [
     'VLMConfig',
     'VLMResult',
     'FrameResult',
+    # Pipeline 状态与进度
+    'PipelineState',
+    'PipelineProgress',
     # VLM 客户端
     'VLMClient',
     'Qwen2VLClient',
@@ -89,6 +92,9 @@ def __getattr__(name: str):
         'StreamReader':          ('.stream_reader', 'StreamReader'),
         'FileReader':            ('.file_reader', 'FileReader'),
         'FrameSampler':          ('.frame_sampler', 'FrameSampler'),
+        # Pipeline 状态与进度
+        'PipelineState':         ('.pipeline_base', 'PipelineState'),
+        'PipelineProgress':      ('.pipeline_base', 'PipelineProgress'),
         # VLM 客户端（从 vlm 子包加载）
         'Qwen2VLClient':         ('.vlm.qwen2', 'Qwen2VLClient'),
         'Qwen3VLClient':         ('.vlm.qwen3', 'Qwen3VLClient'),

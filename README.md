@@ -86,7 +86,7 @@ python scripts/run_parser.py \
 
 ### 方式 2：Python API
 
-#### 传统模式（固定频率抽帧）
+#### 阻塞模式（简单场景）
 
 ```python
 from pymediaparser import LivePipeline, StreamConfig, VLMConfig, Qwen2VLClient
@@ -97,10 +97,90 @@ stream_cfg = StreamConfig(url="rtmp://host/live/stream", target_fps=1.0)
 # 配置 VLM 客户端
 vlm_client = Qwen2VLClient(VLMConfig(device="cuda:0"))
 
-# 创建并运行 Pipeline
+# 创建并运行 Pipeline（阻塞直到 Ctrl+C）
 pipeline = LivePipeline(stream_cfg, vlm_client, prompt="请描述画面中的内容。")
 pipeline.run()
 ```
+
+#### 异步模式（外部系统集成）
+
+适用于外部系统调用，支持启动后立即返回、进度查询和主动停止：
+
+```python
+import time
+from pymediaparser import (
+    ReplayPipeline, LivePipeline, StreamConfig,
+    PipelineState, create_vlm_client
+)
+from pymediaparser.result_handler import ResultHandler
+
+# 自定义 Handler（可选）
+class MyHandler(ResultHandler):
+    def handle(self, result):
+        # 处理结果：写入数据库、发送消息等
+        save_to_db(result)
+    
+    def on_complete(self):
+        print("Pipeline 正常完成")
+    
+    def on_error(self, error):
+        print(f"Pipeline 异常: {error}")
+
+# 创建 Pipeline
+stream_cfg = StreamConfig(url="/path/to/video.mp4", target_fps=1.0)
+vlm_client = create_vlm_client("openai_api", {"base_url": "http://localhost:8000/v1"})
+pipeline = ReplayPipeline(stream_cfg, vlm_client, handlers=[MyHandler()])
+
+# 启动（立即返回）
+pipeline.start()
+
+# 轮询进度
+while pipeline.is_running():
+    progress = pipeline.get_progress()
+    if progress.duration:
+        # ReplayPipeline: 显示百分比
+        print(f"进度: {progress.progress_percent:.1f}% | "
+              f"{progress.current_timestamp:.1f}s / {progress.duration:.1f}s")
+    else:
+        # LivePipeline: 显示帧数和运行时间
+        print(f"已处理: {progress.processed_frames} 帧 | "
+              f"运行时间: {progress.elapsed_time:.0f}s")
+    time.sleep(5)
+
+# 检查最终状态（资源已清理，无需调用 stop()）
+match pipeline.get_state():
+    case PipelineState.COMPLETED:
+        print("处理完成")
+    case PipelineState.STOPPED:
+        print("被主动停止")
+    case PipelineState.ERROR:
+        print(f"异常: {pipeline.get_progress().error}")
+```
+
+#### 主动停止 Pipeline
+
+```python
+# 启动 Pipeline
+pipeline.start()
+
+# 运行一段时间后主动停止
+time.sleep(60)
+pipeline.stop()  # 优雅停止，清理资源
+```
+
+#### Pipeline 状态说明
+
+| 状态 | 含义 | 资源状态 |
+|------|------|----------|
+| `IDLE` | 初始状态，未启动 | 未分配 |
+| `STARTING` | 启动中（加载模型） | 部分分配 |
+| `RUNNING` | 正常运行中 | 已分配 |
+| `STOPPING` | 停止中（清理资源） | 清理中 |
+| `COMPLETED` | 正常完成（仅 ReplayPipeline） | 已清理 |
+| `STOPPED` | 被主动停止 | 已清理 |
+| `ERROR` | 异常终止 | 已清理 |
+
+**核心契约**：进入任何终态（COMPLETED/STOPPED/ERROR）时，资源已清理完毕，调用者无需额外操作。
 
 #### 智能模式（自适应采样）
 
@@ -118,7 +198,6 @@ pipeline = LivePipeline(
     enable_smart_sampling=True,
     smart_config={
         'motion_threshold': 0.3,      # 运动检测阈值
-        'ssim_threshold': 0.80,       # 变化检测阈值
         'backup_interval': 30.0,      # 保底采样间隔（秒）
         'min_frame_interval': 1.0,    # 最小帧间隔（秒）
     },
@@ -127,6 +206,15 @@ pipeline.run()
 ```
  
 ## 主要组件
+
+### Pipeline
+
+| 组件 | 说明 |
+|------|------|
+| `LivePipeline` | 实时流 VLM 分析 Pipeline |
+| `ReplayPipeline` | 文件回放 VLM 分析 Pipeline |
+| `PipelineState` | Pipeline 运行状态枚举 |
+| `PipelineProgress` | Pipeline 进度信息 |
 
 ### 流接入
 

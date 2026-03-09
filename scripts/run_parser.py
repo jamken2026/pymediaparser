@@ -43,6 +43,7 @@ import argparse
 import logging
 import os
 import sys
+import time
 
 # 确保项目 src 目录在搜索路径中（支持直接 python scripts/run_parser.py 运行）
 _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -56,6 +57,7 @@ from pymediaparser.vlm.factory import create_vlm_client
 from pymediaparser.vlm.configs import APIVLMConfig
 from pymediaparser.result_handler import ConsoleResultHandler, HttpCallbackHandler
 from pymediaparser.live_pipeline import LivePipeline
+from pymediaparser.pipeline_base import PipelineState
 
 
 def parse_args() -> argparse.Namespace:
@@ -394,7 +396,37 @@ def main() -> None:
     logger.info("=" * 50)
     
     # ── 运行 Pipeline ────────────────────────────────────────
-    pipeline.run()
+    pipeline.start()
+
+    try:
+        # 轮询进度
+        while pipeline.is_running():
+            progress = pipeline.get_progress()
+            if progress.duration:
+                # ReplayPipeline: 显示百分比
+                pct = progress.progress_percent
+                if pct is not None:
+                    print(f"\r进度: {pct:.1f}% | "
+                          f"{progress.current_timestamp:.1f}s / {progress.duration:.1f}s | "
+                          f"已处理 {progress.processed_frames} 帧", end="")
+                else:
+                    print(f"\r已处理: {progress.processed_frames} 帧 | "
+                          f"运行时间: {progress.elapsed_time:.0f}s", end="")
+            else:
+                # LivePipeline: 显示帧数和运行时间
+                print(f"\r已处理: {progress.processed_frames} 帧 | "
+                      f"运行时间: {progress.elapsed_time:.0f}s", end="")
+            time.sleep(1)
+    except KeyboardInterrupt:
+        print("\n收到 Ctrl+C，正在停止...")
+        pipeline.stop()
+    
+    # 显示最终状态
+    final_state = pipeline.get_state()
+    if final_state == PipelineState.COMPLETED:
+        print(f"\n处理完成，共处理 {pipeline.get_progress().processed_frames} 帧")
+    elif final_state == PipelineState.ERROR:
+        print(f"\n处理异常: {pipeline.get_progress().error}")
 
     # ── 显式清理资源，避免程序退出时 C++ 析构异常 ─────────────
     # 问题：PyTorch/transformers 在程序退出时可能抛出

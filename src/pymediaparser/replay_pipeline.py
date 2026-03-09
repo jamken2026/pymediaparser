@@ -28,6 +28,7 @@ from PIL import Image
 
 from .file_reader import FileReader
 from .frame_sampler import FrameSampler
+from .pipeline_base import BasePipeline, PipelineProgress, PipelineState
 from .result_handler import ConsoleResultHandler, ResultHandler
 from .vlm_base import FrameResult, StreamConfig, VLMClient, VLMResult
 
@@ -49,7 +50,7 @@ _PUT_TIMEOUT = 0.5
 # Pipeline 核心
 # ======================================================================
 
-class ReplayPipeline:
+class ReplayPipeline(BasePipeline):
     """文件回放 VLM 分析 Pipeline（生产者-消费者模型）。
 
     与 LivePipeline 架构一致，支持两种工作模式：
@@ -82,9 +83,12 @@ class ReplayPipeline:
         enable_batch_processing: bool = False,
         smart_config: Optional[Dict[str, Any]] = None,
     ) -> None:
+        # 基本配置
         self.stream_config = stream_config
         self.vlm_client = vlm_client
-        self.handlers: Sequence[ResultHandler] = list(handlers) if handlers else [ConsoleResultHandler()]
+        self.handlers: Sequence[ResultHandler] = (
+            list(handlers) if handlers else [ConsoleResultHandler()]
+        )
         self.prompt = prompt
 
         # 智能功能开关
@@ -116,7 +120,7 @@ class ReplayPipeline:
                 max_wait_time=config.get('batch_timeout', 5.0),
             )
 
-        # 队列配置（与 LivePipeline 结构一致）
+        # 队列配置
         self._queue: queue.Queue = queue.Queue(
             maxsize=stream_config.max_queue_size,
         )
@@ -125,41 +129,208 @@ class ReplayPipeline:
                 maxsize=stream_config.max_queue_size * 2,
             )
 
-        self._stop_event = threading.Event()
-        self._done_event = threading.Event()  # 回放完成事件
+        # 状态管理
+        self._state = PipelineState.IDLE
+        self._state_lock = threading.Lock()
+        self._stop_event = threading.Event()  # 停止信号（主动停止/异常/完成）
+        self._start_time: float = 0.0
+        self._processed_frames: int = 0
+        self._error: Optional[Exception] = None
+        self._current_timestamp: float = 0.0
+
+        # 线程管理
         self._producer_thread: Optional[threading.Thread] = None
         self._consumer_thread: Optional[threading.Thread] = None
         self._file_reader: Optional[FileReader] = None
 
-        # 进度跟踪
-        self._processed_count: int = 0
-
-    # ------------------------------------------------------------------
-    # 公开方法
-    # ------------------------------------------------------------------
+    # ==================================================================
+    # 公开接口
+    # ==================================================================
 
     def start(self) -> None:
         """启动 Pipeline（非阻塞）。"""
-        logger.info("回放 Pipeline 启动中 ...")
-        self._stop_event.clear()
-        self._done_event.clear()
-        self._processed_count = 0
+        with self._state_lock:
+            if self._state != PipelineState.IDLE:
+                if self._is_terminal_state(self._state):
+                    # 终态重启前，先确保旧线程已退出
+                    self._join_threads()
+                    self._reset_for_restart()
+                else:
+                    logger.warning("Pipeline 已在运行中，忽略 start() 调用")
+                    return
+            self._set_state(PipelineState.STARTING)
 
-        # 加载模型
-        self.vlm_client.load()
+        logger.info("回放 Pipeline 启动中 ...")
+
+        try:
+            # 重置状态
+            self._stop_event.clear()
+            self._processed_frames = 0
+            self._error = None
+            self._start_time = time.time()
+            self._current_timestamp = 0.0
+
+            # 加载模型
+            self.vlm_client.load()
+
+            # 通知 handlers
+            self._notify_handlers("on_start")
+
+            # 启动线程
+            self._start_threads()
+
+            # 设置运行状态
+            self._set_state(PipelineState.RUNNING)
+
+            mode_str = "智能模式" if self.enable_smart_sampling else "传统模式"
+            batch_str = "启用批处理" if self.enable_batch_processing else "单帧处理"
+            decode_mode_str = "仅关键帧" if self.stream_config.decode_mode == "keyframe_only" else "全帧解码"
+            logger.info(
+                "回放 Pipeline 已启动 [%s, %s, %s] file=%s fps=%.1f",
+                mode_str, batch_str, decode_mode_str,
+                self.stream_config.url, self.stream_config.target_fps,
+            )
+
+        except Exception as exc:
+            logger.error("Pipeline 启动失败: %s", exc, exc_info=True)
+            self._error = exc
+            self._cleanup_resources()
+            self._set_state(PipelineState.ERROR)
+            self._stop_event.set()  # 通知 run() 退出
+            self._notify_handlers("on_error", exc)
+
+    def stop(self) -> None:
+        """停止 Pipeline（幂等）。"""
+        with self._state_lock:
+            if self._state not in (PipelineState.RUNNING, PipelineState.STARTING):
+                return
+            self._set_state(PipelineState.STOPPING)
+
+        logger.info("回放 Pipeline 停止中 ...")
+
+        # 设置停止信号，通知所有线程退出
+        self._stop_event.set()
+
+        # 尝试向队列放 sentinel（作为备用手段）
+        self._try_put_sentinel()
+
+        # 等待线程退出
+        self._join_threads()
+
+        # 处理缓冲区剩余帧
+        if self.frame_buffer:
+            self._flush_batch_buffer()
+
+        # 清理资源
+        self._cleanup_resources()
+
+        # 设置 STOPPED 状态
+        self._set_state(PipelineState.STOPPED)
 
         # 通知 handlers
-        for h in self.handlers:
-            h.on_start()
+        self._notify_handlers("on_stop")
 
-        # 启动生产者线程
+        logger.info("回放 Pipeline 已停止（共处理 %d 帧）", self._processed_frames)
+
+    def run(self) -> None:
+        """阻塞式运行，文件处理完毕或 Ctrl+C 时退出。"""
+        self.start()
+
+        try:
+            # 等待停止信号（主动停止/异常/正常完成）
+            while not self._stop_event.is_set():
+                self._stop_event.wait(timeout=1.0)
+        except KeyboardInterrupt:
+            logger.info("收到 Ctrl+C，正在停止 ...")
+        finally:
+            if self._state == PipelineState.RUNNING:
+                self.stop()
+
+    def wait(self, timeout: Optional[float] = None) -> bool:
+        """等待 Pipeline 进入终态。"""
+        start = time.time()
+        while True:
+            if self._is_terminal_state(self._state):
+                return True
+            if timeout is not None:
+                elapsed = time.time() - start
+                if elapsed >= timeout:
+                    return False
+            time.sleep(0.1)
+
+    def get_state(self) -> PipelineState:
+        """获取当前运行状态。"""
+        return self._state
+
+    def get_progress(self) -> PipelineProgress:
+        """获取进度信息。"""
+        return PipelineProgress(
+            state=self._state,
+            processed_frames=self._processed_frames,
+            start_time=self._start_time,
+            total_frames=self._get_total_frames(),
+            current_timestamp=self._current_timestamp,
+            duration=self._get_duration(),
+            error=self._error,
+        )
+
+    def is_running(self) -> bool:
+        """是否运行中（RUNNING 状态）。"""
+        return self._state == PipelineState.RUNNING
+
+    def is_completed(self) -> bool:
+        """是否正常完成（COMPLETED 状态）。"""
+        return self._state == PipelineState.COMPLETED
+
+    def is_stopped(self) -> bool:
+        """是否被主动停止（STOPPED 状态）。"""
+        return self._state == PipelineState.STOPPED
+
+    def is_error(self) -> bool:
+        """是否异常终止（ERROR 状态）。"""
+        return self._state == PipelineState.ERROR
+
+    def is_terminal(self) -> bool:
+        """是否处于终态（可重新启动）。"""
+        return self._is_terminal_state(self._state)
+
+    # ==================================================================
+    # 内部方法
+    # ==================================================================
+
+    def _set_state(self, state: PipelineState) -> None:
+        """设置状态。"""
+        old_state = self._state
+        self._state = state
+        logger.debug("Pipeline 状态转换: %s → %s", old_state.value, state.value)
+
+    def _reset_for_restart(self) -> None:
+        """重置状态以支持重新启动。"""
+        self._processed_frames = 0
+        self._error = None
+        self._start_time = 0.0
+        self._current_timestamp = 0.0
+        self._stop_event.clear()
+        self._state = PipelineState.IDLE
+
+    def _notify_handlers(self, method: str, *args: Any) -> None:
+        """通知所有 handlers 调用指定方法。"""
+        for handler in self.handlers:
+            try:
+                func = getattr(handler, method, None)
+                if func is not None:
+                    func(*args)
+            except Exception as exc:
+                logger.error("Handler.%s 异常: %s", method, exc)
+
+    def _start_threads(self) -> None:
+        """启动工作线程。"""
         self._producer_thread = threading.Thread(
             target=self._producer_loop,
             name="replay-producer",
             daemon=True,
         )
 
-        # 根据模式启动其他线程
         if self.enable_smart_sampling:
             self._processor_thread = threading.Thread(
                 target=self._processor_loop,
@@ -183,23 +354,8 @@ class ReplayPipeline:
         for thread in threads:
             thread.start()
 
-        mode_str = "智能模式" if self.enable_smart_sampling else "传统模式"
-        batch_str = "启用批处理" if self.enable_batch_processing else "单帧处理"
-        decode_mode_str = "仅关键帧" if self.stream_config.decode_mode == "keyframe_only" else "全帧解码"
-        logger.info(
-            "回放 Pipeline 已启动 [%s, %s, %s] file=%s fps=%.1f",
-            mode_str, batch_str, decode_mode_str,
-            self.stream_config.url, self.stream_config.target_fps,
-        )
-
-    def stop(self) -> None:
-        """优雅停止 Pipeline。"""
-        if self._stop_event.is_set():
-            return
-        logger.info("回放 Pipeline 停止中 ...")
-        self._stop_event.set()
-
-        # 向队列放 sentinel 让消费者/处理器线程退出
+    def _try_put_sentinel(self) -> None:
+        """尝试向队列放入 sentinel。"""
         try:
             self._queue.put_nowait(None)
         except queue.Full:
@@ -211,12 +367,11 @@ class ReplayPipeline:
             except queue.Full:
                 pass
 
-        # 等待生产者线程退出（生产者会自己关闭 file_reader）
+    def _join_threads(self) -> None:
+        """等待工作线程退出。"""
         if self._producer_thread and self._producer_thread.is_alive():
             self._producer_thread.join(timeout=5)
 
-        # 如果生产者线程仍未退出，设置 file_reader 为 None 避免重复关闭
-        # 注意：不主动关闭 file_reader，因为可能正在解码中
         if self._file_reader is not None:
             logger.warning("生产者线程未能在超时内退出，放弃等待")
             self._file_reader = None
@@ -226,33 +381,70 @@ class ReplayPipeline:
         if self._consumer_thread and self._consumer_thread.is_alive():
             self._consumer_thread.join(timeout=3)
 
-        # 处理缓冲区剩余帧
-        if self.frame_buffer:
-            self._flush_batch_buffer()
+    def _cleanup_resources(self) -> None:
+        """清理资源。"""
+        self.vlm_client.unload()
+
+    def _handle_thread_error(self, thread_name: str, exc: Exception) -> None:
+        """处理线程异常。
+
+        1. 设置 stop_event 通知其他线程退出
+        2. 尝试发送 sentinel
+        3. 清理资源
+        4. 设置 ERROR 状态
+        """
+        logger.error("%s异常: %s", thread_name, exc, exc_info=True)
+        self._error = exc
+
+        # 设置 stop_event，通知其他线程退出
+        self._stop_event.set()
+
+        # 尝试发送 sentinel
+        self._try_put_sentinel()
+
+        # 清理资源
+        self._cleanup_resources()
+
+        # 设置 ERROR 状态
+        with self._state_lock:
+            if self._state != PipelineState.ERROR:
+                self._set_state(PipelineState.ERROR)
 
         # 通知 handlers
-        for h in self.handlers:
-            h.on_stop()
+        self._notify_handlers("on_error", exc)
 
-        # 卸载模型
-        self.vlm_client.unload()
-        logger.info("回放 Pipeline 已停止（共处理 %d 帧）", self._processed_count)
+    def _transition_to_completed(self) -> None:
+        """转换到 COMPLETED 状态。"""
+        # 清理资源
+        self._cleanup_resources()
 
-    def run(self) -> None:
-        """阻塞式运行，文件处理完毕或 Ctrl+C 时退出。"""
-        self.start()
+        # 设置 COMPLETED 状态
+        with self._state_lock:
+            self._set_state(PipelineState.COMPLETED)
 
-        try:
-            while not self._done_event.is_set() and not self._stop_event.is_set():
-                self._done_event.wait(timeout=1.0)
-        except KeyboardInterrupt:
-            logger.info("收到 Ctrl+C，正在停止 ...")
-        finally:
-            self.stop()
+        # 设置停止信号（让 run() 退出）
+        self._stop_event.set()
 
-    # ------------------------------------------------------------------
+        # 通知 handlers
+        self._notify_handlers("on_complete")
+
+        logger.info("回放 Pipeline 正常完成（共处理 %d 帧）", self._processed_frames)
+
+    def _get_total_frames(self) -> Optional[int]:
+        """获取总帧数。"""
+        if self._file_reader is not None and self._file_reader.total_frames > 0:
+            return self._file_reader.total_frames
+        return None
+
+    def _get_duration(self) -> Optional[float]:
+        """获取总时长。"""
+        if self._file_reader is not None and self._file_reader.duration_seconds > 0:
+            return self._file_reader.duration_seconds
+        return None
+
+    # ==================================================================
     # 生产者线程
-    # ------------------------------------------------------------------
+    # ==================================================================
 
     def _producer_loop(self) -> None:
         """生产者：读取文件 → 解码 → 阻塞入队。
@@ -298,7 +490,7 @@ class ReplayPipeline:
                         'timestamp': ts,
                         'frame_index': idx,
                         'significant': True,
-                        'source': ['traditional'],  # 传统固定间隔采样
+                        'source': ['traditional'],
                     }
 
                 # 阻塞入队（短超时 + 循环检查 stop_event）
@@ -306,20 +498,24 @@ class ReplayPipeline:
 
         except Exception as exc:
             if not self._stop_event.is_set():
-                logger.error("生产者线程异常: %s", exc, exc_info=True)
+                self._handle_thread_error("生产者线程", exc)
         finally:
-            # 发送 sentinel 通知下游
-            try:
-                target_queue.put(None, timeout=1.0)
-            except queue.Full:
-                pass
+            # 发送 sentinel 通知下游（阻塞式，确保送达）
+            if not self._stop_event.is_set():
+                self._blocking_put(target_queue, None)
+            else:
+                # 停止时也尝试发送 sentinel
+                try:
+                    target_queue.put(None, timeout=1.0)
+                except queue.Full:
+                    pass
             reader.close()
             self._file_reader = None
             logger.info("生产者线程已退出")
 
-    # ------------------------------------------------------------------
+    # ==================================================================
     # 消费者线程
-    # ------------------------------------------------------------------
+    # ==================================================================
 
     def _consumer_loop(self) -> None:
         """消费者：取帧 → 批量/单帧推理 → 结果回调。"""
@@ -342,24 +538,27 @@ class ReplayPipeline:
 
         except Exception as exc:
             if not self._stop_event.is_set():
-                logger.error("消费者线程异常: %s", exc, exc_info=True)
+                self._handle_thread_error("消费者线程", exc)
+                return
         finally:
             # 处理缓冲区剩余帧
             if self.frame_buffer:
                 self._flush_batch_buffer()
-            # 通知主线程：回放完成
-            self._done_event.set()
             logger.info("消费者线程已退出")
+
+        # 正常完成，转换到 COMPLETED 状态
+        if not self._stop_event.is_set():
+            self._transition_to_completed()
 
     def _process_frame_item(self, item: Dict[str, Any]) -> None:
         """处理单个帧数据项。"""
         image = item['image']
         ts = item['timestamp']
         idx = item['frame_index']
-        batch_count = 0  # 批处理帧数
+        batch_count = 1
 
         if self.frame_buffer is not None:
-            # 批处理模式：add_frame 返回就绪的批次
+            # 批处理模式
             batch_frames = self.frame_buffer.add_frame(item)
             if batch_frames is None:
                 return
@@ -372,11 +571,10 @@ class ReplayPipeline:
             ts = last_frame['timestamp']
             idx = last_frame['frame_index']
             batch_count = len(batch_frames)
-            item = last_frame  # 使用最后一帧记录进度
+            item = last_frame
         else:
             # 单帧推理
             vlm_result = self.vlm_client.analyze(image, self.prompt)
-            batch_count = 1
 
         if vlm_result is None:
             return
@@ -397,20 +595,21 @@ class ReplayPipeline:
             except Exception as exc:
                 logger.error("ResultHandler 异常: %s", exc)
 
-        # 进度跟踪
-        self._processed_count += batch_count
+        # 更新进度
+        self._processed_frames += batch_count
+        self._current_timestamp = ts
+        self._notify_handlers("on_progress", self.get_progress())
         self._log_progress(item)
 
     def _log_progress(self, item: Dict[str, Any]) -> None:
         """输出回放进度日志。"""
         ts = item.get('timestamp', 0.0)
-        frame_idx = item.get('frame_index', self._processed_count)
+        frame_idx = item.get('frame_index', self._processed_frames)
         reader = self._file_reader
 
         if reader is not None and reader.total_frames > 0:
             dur = reader.duration_seconds
             if dur > 0:
-                # 计算预计的总采样帧数（基于目标帧率和视频时长）
                 estimated_total = int(dur * self.stream_config.target_fps)
                 pct = (ts / dur) * 100.0
                 logger.info(
@@ -425,7 +624,7 @@ class ReplayPipeline:
         else:
             logger.info(
                 "[回放进度] 已处理 %d 帧 | 视频 %.1fs",
-                self._processed_count, ts,
+                self._processed_frames, ts,
             )
 
     def _process_batch(self, frames: List[Dict[str, Any]]) -> Optional[VLMResult]:
@@ -490,12 +689,11 @@ class ReplayPipeline:
                         logger.error("ResultHandler 异常: %s", exc)
 
                 # 进度跟踪
-                self._processed_count += len(batch_frames)
-                self._log_progress(last_frame)
+                self._processed_frames += len(batch_frames)
 
-    # ------------------------------------------------------------------
+    # ==================================================================
     # 处理器线程（智能模式专用）
-    # ------------------------------------------------------------------
+    # ==================================================================
 
     def _processor_loop(self) -> None:
         """处理器：智能采样（CPU 密集）。
@@ -511,7 +709,7 @@ class ReplayPipeline:
 
                 if item is None:
                     # 传递 sentinel 给消费者
-                    self._enqueue_frame(None)
+                    self._blocking_put(self._queue, None)
                     break
 
                 frame_np, ts, idx = item
@@ -520,37 +718,27 @@ class ReplayPipeline:
                     for sampled_data in self.smart_sampler.sample(iter([(frame_np, ts)])):
                         if self._stop_event.is_set():
                             break
-                        self._enqueue_frame(sampled_data)
+                        self._blocking_put(self._queue, sampled_data)
                 else:
-                    # 无智能采样器，直接转换入队（防御性代码，理论上不应执行到此分支）
                     pil_image = self._numpy_to_pil(frame_np)
                     frame_data = {
                         'image': pil_image,
                         'timestamp': ts,
                         'frame_index': idx,
                         'significant': True,
-                        'source': ['traditional'],  # 传统固定间隔采样
+                        'source': ['traditional'],
                     }
-                    self._enqueue_frame(frame_data)
+                    self._blocking_put(self._queue, frame_data)
 
         except Exception as exc:
             if not self._stop_event.is_set():
-                logger.error("处理器线程异常: %s", exc, exc_info=True)
+                self._handle_thread_error("处理器线程", exc)
         finally:
             logger.info("处理器线程已退出")
 
-    def _enqueue_frame(self, frame_data: Optional[Dict[str, Any]]) -> None:
-        """将帧数据阻塞入队到主队列（不丢帧）。"""
-        if frame_data is None:
-            # sentinel：使用阻塞式发送，确保一定能送达
-            self._blocking_put(self._queue, None)
-            return
-
-        self._blocking_put(self._queue, frame_data)
-
-    # ------------------------------------------------------------------
+    # ==================================================================
     # 工具方法
-    # ------------------------------------------------------------------
+    # ==================================================================
 
     def _blocking_put(self, q: queue.Queue, item: Any) -> None:
         """阻塞入队，短超时 + 循环检查退出信号。"""

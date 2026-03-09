@@ -13,6 +13,15 @@
 
     handler = ConsoleResultHandler()
     handler.handle(frame_result)
+
+回调扩展
+--------
+ResultHandler 支持以下生命周期回调：
+- on_start(): Pipeline 启动时
+- on_stop(): Pipeline 被主动停止时
+- on_complete(): Pipeline 正常完成时（仅 ReplayPipeline）
+- on_error(error): Pipeline 异常时
+- on_progress(progress): 进度更新时
 """
 
 from __future__ import annotations
@@ -21,9 +30,11 @@ import json
 import logging
 from abc import ABC, abstractmethod
 from datetime import datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any, Optional
 
-from .vlm_base import FrameResult
+if TYPE_CHECKING:
+    from .vlm_base import FrameResult
+    from .pipeline_base import PipelineProgress
 
 logger = logging.getLogger(__name__)
 
@@ -33,10 +44,17 @@ class ResultHandler(ABC):
 
     所有结果输出通道（控制台、HTTP、WebSocket 等）
     都需要继承此类并实现 ``handle`` 方法。
+
+    生命周期回调（可选覆写）：
+        - on_start(): Pipeline 启动时
+        - on_stop(): Pipeline 被主动停止时
+        - on_complete(): Pipeline 正常完成时（仅 ReplayPipeline）
+        - on_error(error): Pipeline 异常时
+        - on_progress(progress): 进度更新时
     """
 
     @abstractmethod
-    def handle(self, result: FrameResult) -> None:
+    def handle(self, result: "FrameResult") -> None:
         """处理单个帧分析结果。
 
         Args:
@@ -47,7 +65,24 @@ class ResultHandler(ABC):
         """Pipeline 启动时的回调（可选覆写）。"""
 
     def on_stop(self) -> None:
-        """Pipeline 停止时的回调（可选覆写）。"""
+        """Pipeline 被主动停止时的回调（可选覆写）。"""
+
+    def on_complete(self) -> None:
+        """Pipeline 正常完成时的回调（可选覆写，仅 ReplayPipeline）。"""
+
+    def on_error(self, error: Exception) -> None:
+        """Pipeline 异常时的回调（可选覆写）。
+
+        Args:
+            error: 异常对象
+        """
+
+    def on_progress(self, progress: "PipelineProgress") -> None:
+        """进度更新回调（可选覆写）。
+
+        Args:
+            progress: 进度信息对象
+        """
 
 
 class ConsoleResultHandler(ResultHandler):
@@ -91,7 +126,12 @@ class ConsoleResultHandler(ResultHandler):
 
     def on_stop(self) -> None:
         print("\n" + "=" * 60)
-        print("  实时流 VLM 分析 — 结束")
+        print("  实时流 VLM 分析 — 被停止")
+        print("=" * 60 + "\n")
+
+    def on_complete(self) -> None:
+        print("\n" + "=" * 60)
+        print("  VLM 分析 — 完成")
         print("=" * 60 + "\n")
 
 
