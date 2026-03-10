@@ -68,9 +68,6 @@ class SmartSampler(ABC):
                 - significant: 是否为显著帧
                 - source: 触发来源 ('smart', 'time', 等)
                 - original_frame: 原始 numpy 数组
-                - cropped_frame: 裁剪后的 numpy 数组（可选）
-                - bbox: 裁剪区域 (x, y, w, h)（可选）
-                - compression_ratio: 压缩比例（可选）
                 - change_metrics: 变化指标字典（可选）
         """
         pass

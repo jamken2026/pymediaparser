@@ -120,7 +120,7 @@ def __getattr__(name: str):
         'MLSmartSampler':        ('.smart_sampler.ml_smart_sampler', 'MLSmartSampler'),
         'MotionDetector':        ('.smart_sampler.motion_detector', 'MotionDetector'),
         'ChangeAnalyzer':        ('.smart_sampler.change_analyzer', 'ChangeAnalyzer'),
-        'ForegroundExtractor':   ('.smart_sampler.foreground_extractor', 'ForegroundExtractor'),
+        'ForegroundExtractor':   ('.image_processor.foreground_extractor', 'ForegroundExtractor'),
         # 帧缓存
         'FrameBuffer':           ('.frame_buffer', 'FrameBuffer'),
     }

@@ -21,11 +21,17 @@
         --model-path /path/to/Qwen3-VL-2B
 
     # 使用 OpenAI 兼容 API（vLLM / Ollama 等）
-    python scripts/run_parser.py \\
-        --url rtmp://host/live/stream \\
-        --vlm-backend openai_api \\
-        --api-base-url http://localhost:8000/v1 \\
+    python scripts/run_parser.py \
+        --url rtmp://host/live/stream \
+        --vlm-backend openai_api \
+        --api-base-url http://localhost:8000/v1 \
         --api-model Qwen2-VL-2B-Instruct
+    
+    # 使用 BMP 调试后端（保存帧为BMP文件，不调用模型）
+    python scripts/run_parser.py \
+        --url rtmp://host/live/stream \
+        --vlm-backend bmp \
+        --model-path /tmp/debug_frames
 
     # HTTP-FLV 流，每 2 秒 1 帧，自定义 prompt
     python scripts/run_parser.py \\
@@ -78,6 +84,7 @@ def parse_args() -> argparse.Namespace:
 使用不同 VLM 后端:
   %(prog)s --url rtmp://host/live/stream --vlm-backend qwen3 --model-path /path/to/Qwen3-VL-2B
   %(prog)s --url rtmp://host/live/stream --vlm-backend openai_api --api-base-url http://localhost:8000/v1
+  %(prog)s --url rtmp://host/live/stream --vlm-backend bmp --model-path /tmp/debug_frames
   
 智能采样模式:
   %(prog)s --url rtmp://host/live/stream --smart-sampling
@@ -132,7 +139,7 @@ def parse_args() -> argparse.Namespace:
     vlm_group = parser.add_argument_group("VLM 模型配置")
     vlm_group.add_argument(
         "--vlm-backend", default="qwen35",
-        help="VLM 后端名称: qwen2 / qwen3 / qwen35 / openai_api（默认: qwen35）",
+        help="VLM 后端名称: qwen2 / qwen3 / qwen35 / openai_api / bmp（默认: qwen35）",
     )
     vlm_group.add_argument(
         "--model-path", default=None,

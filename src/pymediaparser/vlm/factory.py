@@ -28,6 +28,7 @@ _REGISTRY: Dict[str, Tuple[str, str]] = {
     "qwen3": ("pymediaparser.vlm.qwen3", "Qwen3VLClient"),
     "qwen35": ("pymediaparser.vlm.qwen35", "Qwen35Client"),
     "openai_api": ("pymediaparser.vlm.openai_api", "OpenAIAPIClient"),
+    "bmp": ("pymediaparser.vlm.bmp", "BMPVLMClient"),
 }
 
 

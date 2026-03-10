@@ -408,7 +408,7 @@ class TestMLSmartSampler:
                     f"frame_index 应单调递增: {indices}"
 
     def test_cropped_frame_present_for_smart(self):
-        """smart source 的结果应包含 cropped_frame 和 bbox。"""
+        """所有结果应包含 original_frame 字段。"""
         sampler = MLSmartSampler(
             min_frame_interval=0.0,
             backup_interval=1.0,
@@ -417,11 +417,9 @@ class TestMLSmartSampler:
         results = list(sampler.sample(iter(frames)))
 
         for result in results:
-            # 非周期触发帧应有裁剪信息
-            if 'periodic' not in result['source']:
-                assert 'cropped_frame' in result
-                assert 'bbox' in result
-                assert 'compression_ratio' in result
+            # 所有帧都应有 original_frame
+            assert 'original_frame' in result
+            assert result['original_frame'] is not None
 
     def test_empty_and_none_frames_skipped(self):
         """None 和空帧应被跳过。"""
@@ -465,7 +463,7 @@ class TestMLSmartSampler:
             "首帧 significant 应为 False"
 
     def test_first_frame_no_crop(self):
-        """首帧不裁剪，输出整帧。"""
+        """首帧输出整帧。"""
         sampler = MLSmartSampler()
         frame = _make_natural_frame(seed=0)
         h, w = frame.shape[:2]
@@ -473,14 +471,9 @@ class TestMLSmartSampler:
         results = list(sampler.sample(iter(frames)))
 
         result = results[0]
-        assert 'cropped_frame' in result
-        assert 'bbox' in result
-        assert result['bbox'] == (0, 0, w, h), \
-            f"首帧 bbox 应为整帧，实际: {result['bbox']}"
-        assert result['compression_ratio'] == 1.0, \
-            "首帧 compression_ratio 应为 1.0"
-        # cropped_frame 应与 original_frame 相同
-        np.testing.assert_array_equal(result['cropped_frame'], result['original_frame'])
+        assert 'original_frame' in result
+        # original_frame 应为完整帧
+        assert result['original_frame'].shape == (h, w, 3)
 
     def test_first_frame_change_metrics(self):
         """首帧 change_metrics 应为初始值。"""
@@ -558,8 +551,6 @@ class TestMLSmartSampler:
 
             assert len(results) == 1, f"分辨率 {w}x{h} 首帧应输出"
             result = results[0]
-            assert result['bbox'] == (0, 0, w, h), \
-                f"分辨率 {w}x{h} bbox 不正确"
             # 验证输出图像尺寸
             assert result['image'].size == (w, h), \
                 f"输出图像尺寸应为 {w}x{h}，实际: {result['image'].size}"

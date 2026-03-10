@@ -3,7 +3,9 @@
 支持的后端：
 - qwen2: Qwen2-VL 本地 transformers 推理
 - qwen3: Qwen3-VL 本地 transformers 推理
+- qwen35: Qwen3.5-VL 本地 transformers 推理
 - openai_api: OpenAI 兼容 API（vLLM / Ollama / TGI / OpenAI / 通义千问）
+- bmp: 虚拟调试后端，将图像保存为BMP文件
 
 典型用法::
 

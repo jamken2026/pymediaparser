@@ -10,7 +10,6 @@ import cv2
 from .base import SmartSampler
 from .motion_detector import MotionDetector
 from .change_analyzer import ChangeAnalyzer
-from .foreground_extractor import ForegroundExtractor
 
 logger = logging.getLogger(__name__)
 
@@ -38,7 +37,6 @@ class SimpleSmartSampler(SmartSampler):
 
         self.motion_detector = MotionDetector(method=motion_method, threshold=motion_threshold)
         self.change_analyzer = ChangeAnalyzer(ssim_threshold=ssim_threshold)
-        self.foreground_extractor = ForegroundExtractor()
 
         logger.info(
             "SimpleSmartSampler 初始化完成 - 智能采样: %s, 变化阈值: %.2f, 运动阈值: %.2f, 最小间隔: %.1fs",
@@ -113,16 +111,8 @@ class SimpleSmartSampler(SmartSampler):
         if should_emit:
             # 采样成功，更新change_analyzer的参考帧
             self.change_analyzer.update_reference(frame_np)
-            if motion_detected:
-                cropped_frame, bbox = self.foreground_extractor.extract_foreground(frame_np, motion_mask)
-                compression_ratio = self.foreground_extractor.calculate_compression_ratio(
-                    frame_np.shape, cropped_frame.shape)
-            else:
-                cropped_frame = frame_np
-                bbox = (0, 0, frame_np.shape[1], frame_np.shape[0])
-                compression_ratio = 1.0
             
-            pil_image = self._numpy_to_pil(cropped_frame)
+            pil_image = self._numpy_to_pil(frame_np)
             
             # 收集触发源列表
             triggers = []
@@ -147,9 +137,6 @@ class SimpleSmartSampler(SmartSampler):
                 'significant': is_significant,
                 'source': triggers,  # 触发源列表
                 'original_frame': frame_np,
-                'cropped_frame': cropped_frame,
-                'bbox': bbox,
-                'compression_ratio': compression_ratio,
                 'change_metrics': {
                     'ssim_score': change_result['ssim_score'],
                     'combined_score': change_result['combined_score'],
@@ -166,8 +153,7 @@ class SimpleSmartSampler(SmartSampler):
                 "相似度=%.3f(阈值<%.2f) | "
                 "运动=%s(得分=%.3f) | "
                 "综合=%.3f | "
-                "来源=%s | "
-                "裁剪后比例=%.1f%%",
+                "来源=%s",
                 frame_idx,
                 ts,
                 change_result['ssim_score'],
@@ -176,7 +162,6 @@ class SimpleSmartSampler(SmartSampler):
                 motion_score,
                 change_result['combined_score'],
                 source_label,
-                compression_ratio * 100
             )
             
             return result
