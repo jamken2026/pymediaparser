@@ -221,6 +221,39 @@ def parse_args() -> argparse.Namespace:
         help="批量处理帧时间戳最大跨度（秒，默认: 5.0）",
     )
 
+    # ── 图像预处理配置 ───────────────────────────────────────
+    preprocess_group = parser.add_argument_group("图像预处理配置")
+    preprocess_group.add_argument(
+        "--preprocessing",
+        choices=["resize", "roi_crop"],
+        default=None,
+        help="启用图像预处理并指定策略: resize=缩放到指定尺寸, roi_crop=对非周期触发帧进行ROI裁剪（默认: 不启用）",
+    )
+    preprocess_group.add_argument(
+        "--max-size",
+        type=int,
+        default=1024,
+        help="[resize策略] 图像最大边长（像素），超过时等比缩放（默认: 1024）",
+    )
+    preprocess_group.add_argument(
+        "--roi-method",
+        choices=["motion", "saliency"],
+        default="motion",
+        help="[roi_crop策略] ROI检测方法: motion=帧差法, saliency=显著性检测（默认: motion）",
+    )
+    preprocess_group.add_argument(
+        "--roi-padding",
+        type=float,
+        default=0.2,
+        help="[roi_crop策略] 边界扩展比例（默认: 0.2）",
+    )
+    preprocess_group.add_argument(
+        "--min-roi-ratio",
+        type=float,
+        default=0.2,
+        help="[roi_crop策略] 最小占比阈值，ROI区域过小时扩展到该比例（默认: 0.2）",
+    )
+
     # ── 输出配置 ─────────────────────────────────────────────
     output_group = parser.add_argument_group("输出配置")
     output_group.add_argument(
@@ -348,6 +381,20 @@ def main() -> None:
             'batch_timeout': args.batch_timeout,
         }
 
+    # 构建预处理配置
+    preprocess_config = None
+    if args.preprocessing is not None:
+        from pymediaparser.image_processor import ResizeConfig, ROICropConfig
+
+        if args.preprocessing == 'resize':
+            preprocess_config = ResizeConfig(max_size=args.max_size)
+        elif args.preprocessing == 'roi_crop':
+            preprocess_config = ROICropConfig(
+                method=args.roi_method,
+                padding_ratio=args.roi_padding,
+                min_roi_ratio=args.min_roi_ratio,
+            )
+
     if is_replay:
         # 文件回放模式
         from pymediaparser.replay_pipeline import ReplayPipeline
@@ -359,6 +406,8 @@ def main() -> None:
             enable_smart_sampling=args.smart_sampling,
             enable_batch_processing=args.batch_processing,
             smart_config=smart_config,
+            preprocessing=args.preprocessing,
+            preprocess_config=preprocess_config,
         )
     else:
         # 实时流模式
@@ -370,6 +419,8 @@ def main() -> None:
             enable_smart_sampling=args.smart_sampling,
             enable_batch_processing=args.batch_processing,
             smart_config=smart_config,
+            preprocessing=args.preprocessing,
+            preprocess_config=preprocess_config,
         )
     
     # 显示运行模式信息
@@ -399,6 +450,16 @@ def main() -> None:
     if args.batch_processing:
         logger.info("批缓冲区:   %d", args.batch_buffer_size)
         logger.info("帧时间戳跨度上限: %.1f秒", args.batch_timeout)
+
+    # 显示预处理配置
+    if args.preprocessing:
+        logger.info("预处理策略: %s", args.preprocessing)
+        if args.preprocessing == 'resize':
+            logger.info("最大边长:   %d像素", args.max_size)
+        elif args.preprocessing == 'roi_crop':
+            logger.info("ROI方法:    %s", args.roi_method)
+            logger.info("边界扩展:   %.0f%%", args.roi_padding * 100)
+            logger.info("最小占比:   %.0f%%", args.min_roi_ratio * 100)
 
     logger.info("=" * 50)
     

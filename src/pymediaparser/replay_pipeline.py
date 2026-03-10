@@ -21,7 +21,7 @@ import logging
 import queue
 import threading
 import time
-from typing import Any, Dict, List, Optional, Sequence
+from typing import Any, Dict, List, Optional, Sequence, Union
 
 import numpy as np
 from PIL import Image
@@ -39,6 +39,18 @@ try:
     _SMART_FEATURES_AVAILABLE = True
 except ImportError:
     _SMART_FEATURES_AVAILABLE = False
+
+# 图像预处理导入（可选）
+try:
+    from .image_processor import (
+        BaseProcessor,
+        ResizeConfig,
+        ROICropConfig,
+        create_processor,
+    )
+    _PREPROCESSOR_AVAILABLE = True
+except ImportError:
+    _PREPROCESSOR_AVAILABLE = False
 
 logger = logging.getLogger(__name__)
 
@@ -82,6 +94,9 @@ class ReplayPipeline(BasePipeline):
         enable_smart_sampling: bool = False,
         enable_batch_processing: bool = False,
         smart_config: Optional[Dict[str, Any]] = None,
+        # 图像预处理参数
+        preprocessing: Optional[str] = None,
+        preprocess_config: Union[ResizeConfig, ROICropConfig, None] = None,
     ) -> None:
         # 基本配置
         self.stream_config = stream_config
@@ -120,11 +135,28 @@ class ReplayPipeline(BasePipeline):
                 max_wait_time=config.get('batch_timeout', 5.0),
             )
 
+        # 图像预处理器初始化
+        self.preprocessor: Optional[BaseProcessor] = None
+        self._preprocessing_enabled = False
+
+        if preprocessing is not None and _PREPROCESSOR_AVAILABLE:
+            self.preprocessor = create_processor(preprocessing, preprocess_config)
+            self._preprocessing_enabled = True
+            logger.info("图像预处理器已启用: 策略=%s", preprocessing)
+        elif preprocessing is not None and not _PREPROCESSOR_AVAILABLE:
+            logger.warning("图像预处理模块未安装，预处理功能已禁用")
+
+        # 判断是否需要处理器线程（智能采样或预处理任一启用）
+        self._use_processor_thread = bool(
+            self.enable_smart_sampling or self._preprocessing_enabled,
+        )
+
         # 队列配置
         self._queue: queue.Queue = queue.Queue(
             maxsize=stream_config.max_queue_size,
         )
-        if self.enable_smart_sampling:
+        # 处理器队列：智能采样或预处理任一启用时创建
+        if self._use_processor_thread:
             self._processor_queue: queue.Queue = queue.Queue(
                 maxsize=stream_config.max_queue_size * 2,
             )
@@ -331,7 +363,7 @@ class ReplayPipeline(BasePipeline):
             daemon=True,
         )
 
-        if self.enable_smart_sampling:
+        if self._use_processor_thread:
             self._processor_thread = threading.Thread(
                 target=self._processor_loop,
                 name="replay-processor",
@@ -361,7 +393,7 @@ class ReplayPipeline(BasePipeline):
         except queue.Full:
             pass
 
-        if self.enable_smart_sampling:
+        if self._use_processor_thread:
             try:
                 self._processor_queue.put_nowait(None)
             except queue.Full:
@@ -450,7 +482,7 @@ class ReplayPipeline(BasePipeline):
         """生产者：读取文件 → 解码 → 阻塞入队。
 
         传统模式：输出字典格式到主队列
-        智能模式：输出原始帧到处理器队列
+        智能模式/预处理模式：输出原始帧到处理器队列
 
         队列满时阻塞等待（不丢帧）。
         """
@@ -458,7 +490,7 @@ class ReplayPipeline(BasePipeline):
         self._file_reader = reader
         sampler = FrameSampler(target_fps=self.stream_config.target_fps)
 
-        target_queue = self._processor_queue if self.enable_smart_sampling else self._queue
+        target_queue = self._processor_queue if self._use_processor_thread else self._queue
 
         try:
             reader.open()
@@ -478,8 +510,8 @@ class ReplayPipeline(BasePipeline):
                 if self._stop_event.is_set():
                     break
 
-                if self.enable_smart_sampling:
-                    # 智能模式：PIL 转 numpy(BGR) 入处理器队列
+                if self._use_processor_thread:
+                    # 智能模式/预处理模式：PIL 转 numpy(BGR) 入处理器队列
                     import cv2
                     frame_np = cv2.cvtColor(np.array(image), cv2.COLOR_RGB2BGR)
                     item = (frame_np, ts, idx)
@@ -678,9 +710,9 @@ class ReplayPipeline(BasePipeline):
     # ==================================================================
 
     def _processor_loop(self) -> None:
-        """处理器：智能采样（CPU 密集）。
+        """处理器：智能采样（可选）+ 预处理（可选）。
 
-        从处理器队列取原始帧 → 智能采样 → 阻塞入主队列
+        从处理器队列取原始帧 → 智能采样（可选）→ 预处理（可选）→ 阻塞入主队列
         """
         try:
             while not self._stop_event.is_set():
@@ -696,11 +728,31 @@ class ReplayPipeline(BasePipeline):
 
                 frame_np, ts, idx = item
 
+                # 情况1: 智能采样器 + 预处理器
                 if self.smart_sampler:
                     for sampled_data in self.smart_sampler.sample(iter([(frame_np, ts)])):
                         if self._stop_event.is_set():
                             break
+                        # 预处理采样后的帧
+                        if self.preprocessor:
+                            sampled_data = self.preprocessor.process_frame(sampled_data)
                         self._blocking_put(self._queue, sampled_data)
+
+                # 情况2: 仅预处理器（无智能采样器）
+                elif self.preprocessor:
+                    # 直接对原始帧进行预处理
+                    pil_image = self._numpy_to_pil(frame_np)
+                    frame_data = {
+                        'image': pil_image,
+                        'timestamp': ts,
+                        'frame_index': idx,
+                        'significant': True,
+                        'source': ['traditional'],
+                    }
+                    processed_data = self.preprocessor.process_frame(frame_data)
+                    self._blocking_put(self._queue, processed_data)
+
+                # 情况3: 无处理器（不应该进入此线程）
                 else:
                     pil_image = self._numpy_to_pil(frame_np)
                     frame_data = {

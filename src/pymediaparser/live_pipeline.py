@@ -19,7 +19,7 @@ import logging
 import queue
 import threading
 import time
-from typing import Any, Dict, List, Optional, Sequence
+from typing import Any, Dict, List, Optional, Sequence, Union
 
 from PIL import Image
 import numpy as np
@@ -37,6 +37,18 @@ try:
     _SMART_FEATURES_AVAILABLE = True
 except ImportError:
     _SMART_FEATURES_AVAILABLE = False
+
+# 图像预处理导入（可选）
+try:
+    from .image_processor import (
+        BaseProcessor,
+        ResizeConfig,
+        ROICropConfig,
+        create_processor,
+    )
+    _PREPROCESSOR_AVAILABLE = True
+except ImportError:
+    _PREPROCESSOR_AVAILABLE = False
 
 logger = logging.getLogger(__name__)
 
@@ -83,6 +95,9 @@ class LivePipeline(BasePipeline):
         enable_smart_sampling: bool = False,
         enable_batch_processing: bool = False,
         smart_config: Optional[Dict[str, Any]] = None,
+        # 图像预处理参数
+        preprocessing: Optional[str] = None,
+        preprocess_config: Union[ResizeConfig, ROICropConfig, None] = None,
     ) -> None:
         # 基本配置
         self.stream_config = stream_config
@@ -121,11 +136,28 @@ class LivePipeline(BasePipeline):
                 max_wait_time=config.get('batch_timeout', 5.0),
             )
 
+        # 图像预处理器初始化
+        self.preprocessor: Optional[BaseProcessor] = None
+        self._preprocessing_enabled = False
+
+        if preprocessing is not None and _PREPROCESSOR_AVAILABLE:
+            self.preprocessor = create_processor(preprocessing, preprocess_config)
+            self._preprocessing_enabled = True
+            logger.info("图像预处理器已启用: 策略=%s", preprocessing)
+        elif preprocessing is not None and not _PREPROCESSOR_AVAILABLE:
+            logger.warning("图像预处理模块未安装，预处理功能已禁用")
+
+        # 判断是否需要处理器线程（智能采样或预处理任一启用）
+        self._use_processor_thread = bool(
+            self.enable_smart_sampling or self._preprocessing_enabled,
+        )
+
         # 队列配置
         self._queue: queue.Queue = queue.Queue(
             maxsize=stream_config.max_queue_size,
         )
-        if self.enable_smart_sampling:
+        # 处理器队列：智能采样或预处理任一启用时创建
+        if self._use_processor_thread:
             self._processor_queue: queue.Queue = queue.Queue(
                 maxsize=stream_config.max_queue_size * 2,
             )
@@ -333,7 +365,7 @@ class LivePipeline(BasePipeline):
             daemon=True,
         )
 
-        if self.enable_smart_sampling:
+        if self._use_processor_thread:
             self._processor_thread = threading.Thread(
                 target=self._processor_loop,
                 name="processor",
@@ -363,7 +395,7 @@ class LivePipeline(BasePipeline):
         except queue.Full:
             pass
 
-        if self.enable_smart_sampling:
+        if self._use_processor_thread:
             try:
                 self._processor_queue.put_nowait(None)
             except queue.Full:
@@ -416,7 +448,7 @@ class LivePipeline(BasePipeline):
         """生产者：拉流 → 解码 → 入队列。
 
         传统模式：输出字典格式到主队列
-        智能模式：输出原始帧到处理器队列
+        智能模式/预处理模式：输出原始帧到处理器队列
 
         队列满时丢弃旧帧，保证新帧能入队。
         """
@@ -424,15 +456,15 @@ class LivePipeline(BasePipeline):
         self._stream_reader = reader
         sampler = FrameSampler(target_fps=self.stream_config.target_fps)
 
-        target_queue = self._processor_queue if self.enable_smart_sampling else self._queue
+        target_queue = self._processor_queue if self._use_processor_thread else self._queue
 
         try:
             for image, ts, idx in sampler.sample(reader.frames()):
                 if self._stop_event.is_set():
                     break
 
-                if self.enable_smart_sampling:
-                    # 智能模式：PIL 转 numpy(BGR) 入处理器队列
+                if self._use_processor_thread:
+                    # 智能模式/预处理模式：PIL 转 numpy(BGR) 入处理器队列
                     import cv2
                     frame_np = cv2.cvtColor(np.array(image), cv2.COLOR_RGB2BGR)
                     item = (frame_np, ts, idx)
@@ -602,9 +634,9 @@ class LivePipeline(BasePipeline):
     # ==================================================================
 
     def _processor_loop(self) -> None:
-        """处理器：智能采样（CPU 密集）。
+        """处理器：智能采样（可选）+ 预处理（可选）。
 
-        从处理器队列取原始帧 → 智能采样 → 输出字典格式到主队列
+        从处理器队列取原始帧 → 智能采样（可选）→ 预处理（可选）→ 输出字典格式到主队列
         """
         try:
             while not self._stop_event.is_set():
@@ -620,14 +652,33 @@ class LivePipeline(BasePipeline):
 
                 frame_np, ts, idx = item
 
+                # 情况1: 智能采样器 + 预处理器
                 if self.smart_sampler:
-                    # 智能采样处理
                     for sampled_data in self.smart_sampler.sample(iter([(frame_np, ts)])):
                         if self._stop_event.is_set():
                             break
+                        # 预处理采样后的帧
+                        if self.preprocessor:
+                            sampled_data = self.preprocessor.process_frame(sampled_data)
                         self._enqueue_frame(sampled_data)
+
+                # 情况2: 仅预处理器（无智能采样器）
+                elif self.preprocessor:
+                    # 直接对原始帧进行预处理
+                    pil_image = self._numpy_to_pil(frame_np)
+                    frame_data = {
+                        'image': pil_image,
+                        'timestamp': ts,
+                        'frame_index': idx,
+                        'significant': True,
+                        'source': ['traditional'],
+                    }
+                    processed_data = self.preprocessor.process_frame(frame_data)
+                    self._enqueue_frame(processed_data)
+
+                # 情况3: 无处理器（不应该进入此线程）
                 else:
-                    # 无智能采样器，直接转换入队
+                    # 直接转发
                     pil_image = self._numpy_to_pil(frame_np)
                     frame_data = {
                         'image': pil_image,
@@ -703,6 +754,38 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--smart-sampling", action="store_true", help="启用智能采样")
     parser.add_argument("--batch-processing", action="store_true", help="启用批量处理")
 
+    # 图像预处理
+    parser.add_argument(
+        "--preprocessing",
+        choices=["resize", "roi_crop"],
+        default=None,
+        help="启用图像预处理并指定策略: resize=缩放到指定尺寸, roi_crop=对非周期触发帧进行ROI裁剪 (默认: 不启用)",
+    )
+    parser.add_argument(
+        "--max-size",
+        type=int,
+        default=1024,
+        help="[resize策略] 图像最大边长（像素），超过时等比缩放 (默认: 1024)",
+    )
+    parser.add_argument(
+        "--roi-method",
+        choices=["motion", "saliency"],
+        default="motion",
+        help="[roi_crop策略] ROI检测方法: motion=帧差法, saliency=显著性检测 (默认: motion)",
+    )
+    parser.add_argument(
+        "--roi-padding",
+        type=float,
+        default=0.2,
+        help="[roi_crop策略] 边界扩展比例 (默认: 0.2)",
+    )
+    parser.add_argument(
+        "--min-roi-ratio",
+        type=float,
+        default=0.2,
+        help="[roi_crop策略] 最小占比阈值，ROI区域过小时扩展到该比例 (默认: 0.2)",
+    )
+
     # 日志
     parser.add_argument("--log-level", default="INFO",
                         choices=["DEBUG", "INFO", "WARNING", "ERROR"],
@@ -763,6 +846,20 @@ def main(argv: Sequence[str] | None = None) -> None:
         vlm_cfg = VLMConfig(**vlm_kwargs)
         vlm_client = create_vlm_client(backend, vlm_cfg)
 
+    # 构建预处理配置
+    preprocess_config = None
+    if args.preprocessing is not None:
+        from .image_processor import ResizeConfig, ROICropConfig
+
+        if args.preprocessing == 'resize':
+            preprocess_config = ResizeConfig(max_size=args.max_size)
+        elif args.preprocessing == 'roi_crop':
+            preprocess_config = ROICropConfig(
+                method=args.roi_method,
+                padding_ratio=args.roi_padding,
+                min_roi_ratio=args.min_roi_ratio,
+            )
+
     # 构建并运行 Pipeline
     pipeline = LivePipeline(
         stream_config=stream_cfg,
@@ -770,6 +867,8 @@ def main(argv: Sequence[str] | None = None) -> None:
         prompt=args.prompt,
         enable_smart_sampling=args.smart_sampling,
         enable_batch_processing=args.batch_processing,
+        preprocessing=args.preprocessing,
+        preprocess_config=preprocess_config,
     )
 
     logger.info(
