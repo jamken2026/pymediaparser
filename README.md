@@ -68,9 +68,30 @@ VLM 后端 'qwen2' 缺少必要的依赖包
 
 ## 快速开始
 
+> 💡 **入门提示**：推荐先使用 **BMP 后端**（无需 GPU）熟悉 API，再切换到实际 VLM 后端。
+
 ### 方式 1：命令行脚本
 
 使用 `scripts/run_parser.py` 脚本快速启动媒体流解析：
+
+#### BMP 后端（推荐入门，无需 GPU）
+
+```bash
+# 使用 BMP 后端调试实时流（帧保存为 BMP 文件）
+python scripts/run_parser.py \
+    --url rtmp://host/live/stream \
+    --vlm-backend bmp \
+    --model-path /tmp/debug_frames
+
+# 使用 BMP 后端分析本地视频文件
+python scripts/run_parser.py \
+    --mode replay \
+    --url /path/to/video.mp4 \
+    --vlm-backend bmp \
+    --model-path /tmp/debug_frames
+```
+
+#### Qwen3.5 本地模型（需要 GPU）
 
 ```bash
 # RTMP 流，每秒 1 帧，使用 GPU 推理
@@ -81,7 +102,22 @@ python scripts/run_parser.py \
     --url http://host/live/stream.flv \
     --fps 0.5 \
     --prompt "识别画面中的人物并描述他们的行为。"
+```
 
+#### OpenAI API 后端（无需本地 GPU）
+
+```bash
+# 使用 vLLM / Ollama 服务
+python scripts/run_parser.py \
+    --url rtmp://host/live/stream \
+    --vlm-backend openai_api \
+    --api-base-url http://localhost:8000/v1 \
+    --api-model Qwen2-VL-7B-Instruct
+```
+
+#### 高级功能
+
+```bash
 # 启用智能采样模式
 python scripts/run_parser.py \
     --url rtmp://host/live/stream \
@@ -118,6 +154,64 @@ python scripts/run_parser.py \
 | `--batch-processing` | False | 启用批量处理 |
 | `--callback-url` | None | HTTP 回调地址 |
 
+### 方式 2：Python API
+
+通过 Python 代码调用库接口，适合集成到现有项目中：
+
+#### BMP 后端（推荐入门，无需 GPU）
+
+```python
+import tempfile
+from pymediaparser import LivePipeline, ReplayPipeline, StreamConfig, VLMConfig, create_vlm_client
+
+# 创建 BMP 后端客户端（帧保存为 BMP 文件）
+output_dir = tempfile.mkdtemp(prefix="pipeline_")
+vlm_client = create_vlm_client("bmp", VLMConfig(model_path=output_dir))
+
+# 实时流分析
+stream_cfg = StreamConfig(url="rtmp://host/live/stream", target_fps=1.0)
+pipeline = LivePipeline(stream_cfg, vlm_client)
+pipeline.run()  # Ctrl+C 停止
+
+# 文件回放分析
+stream_cfg = StreamConfig(url="/path/to/video.mp4", target_fps=1.0)
+pipeline = ReplayPipeline(stream_cfg, vlm_client)
+pipeline.run()  # 处理完毕自动退出
+
+print(f"帧已保存到: {output_dir}")
+```
+
+#### Qwen3.5 本地模型（需要 GPU）
+
+```python
+from pymediaparser import LivePipeline, StreamConfig, create_vlm_client
+from pymediaparser.vlm.configs import LocalVLMConfig
+
+stream_cfg = StreamConfig(url="rtmp://host/live/stream", target_fps=1.0)
+vlm_client = create_vlm_client("qwen35", LocalVLMConfig(device="cuda:0"))
+
+pipeline = LivePipeline(stream_cfg, vlm_client, prompt="请描述画面内容。")
+pipeline.run()
+```
+
+#### OpenAI API 后端（无需本地 GPU）
+
+```python
+from pymediaparser import LivePipeline, StreamConfig, create_vlm_client
+from pymediaparser.vlm.configs import APIVLMConfig
+
+stream_cfg = StreamConfig(url="rtmp://host/live/stream", target_fps=1.0)
+vlm_client = create_vlm_client("openai_api", APIVLMConfig(
+    base_url="http://localhost:8000/v1",
+    model_name="Qwen2-VL-7B-Instruct",
+))
+
+pipeline = LivePipeline(stream_cfg, vlm_client, prompt="请描述画面内容。")
+pipeline.run()
+```
+
+> 📖 **更多示例**：完整的 API 用法请参考 [`examples/`](examples/) 目录，包含智能采样、批量处理、自定义处理器等高级用法。
+
 ## 核心 Pipeline 类
 
 本项目提供两个核心 Pipeline 类，分别用于实时流分析和文件回放分析：
@@ -131,11 +225,11 @@ python scripts/run_parser.py \
 
 用于分析实时视频流，持续运行直到手动停止。
 
-#### 阻塞模式
+#### BMP 后端示例（推荐入门，无需 GPU）
 
 ```python
-from pymediaparser import LivePipeline, StreamConfig, create_vlm_client
-from pymediaparser.vlm.configs import LocalVLMConfig
+import tempfile
+from pymediaparser import LivePipeline, StreamConfig, VLMConfig, create_vlm_client
 
 # 配置视频流
 stream_cfg = StreamConfig(
@@ -143,22 +237,47 @@ stream_cfg = StreamConfig(
     target_fps=1.0,  # 每秒采样 1 帧
 )
 
-# 方式 1：使用本地 Qwen 模型（需要 [vlm-qwen] 依赖）
+# 使用 BMP 后端（帧保存为 BMP 文件，无需 GPU）
+output_dir = tempfile.mkdtemp(prefix="live_pipeline_")
+vlm_client = create_vlm_client("bmp", VLMConfig(model_path=output_dir))
+
+# 创建并运行 Pipeline
+pipeline = LivePipeline(stream_cfg, vlm_client)
+pipeline.run()  # 阻塞直到 Ctrl+C
+# 帧图像将保存到 output_dir 目录
+print(f"帧已保存到: {output_dir}")
+```
+
+#### Qwen3.5 本地模型示例（需要 GPU）
+
+```python
+from pymediaparser import LivePipeline, StreamConfig, create_vlm_client
+from pymediaparser.vlm.configs import LocalVLMConfig
+
+stream_cfg = StreamConfig(url="rtmp://host/live/stream", target_fps=1.0)
 vlm_client = create_vlm_client("qwen35", LocalVLMConfig(device="cuda:0"))
 
-# 方式 2：使用 OpenAI 兼容 API（无需额外依赖）
-# from pymediaparser.vlm.configs import APIVLMConfig
-# vlm_client = create_vlm_client("openai_api", APIVLMConfig(
-#     base_url="http://localhost:8000/v1",
-#     model_name="Qwen2-VL-2B-Instruct",
-# ))
-
-# 创建并运行 Pipeline（阻塞直到 Ctrl+C）
 pipeline = LivePipeline(
     stream_cfg,
     vlm_client,
     prompt="请描述画面中的内容。",
 )
+pipeline.run()
+```
+
+#### OpenAI API 后端示例（无需本地 GPU）
+
+```python
+from pymediaparser import LivePipeline, StreamConfig, create_vlm_client
+from pymediaparser.vlm.configs import APIVLMConfig
+
+stream_cfg = StreamConfig(url="rtmp://host/live/stream", target_fps=1.0)
+vlm_client = create_vlm_client("openai_api", APIVLMConfig(
+    base_url="http://localhost:8000/v1",
+    model_name="Qwen2-VL-7B-Instruct",
+))
+
+pipeline = LivePipeline(stream_cfg, vlm_client, prompt="请描述画面内容。")
 pipeline.run()
 ```
 
@@ -193,21 +312,38 @@ pipeline.stop()
 
 用于分析本地视频文件或网络视频，处理完毕后自动结束。
 
-#### 阻塞模式
+#### BMP 后端示例（推荐入门，无需 GPU）
+
+```python
+import tempfile
+from pymediaparser import ReplayPipeline, StreamConfig, VLMConfig, create_vlm_client
+
+# 配置视频文件
+stream_cfg = StreamConfig(
+    url="/path/to/video.mp4",
+    target_fps=1.0,
+)
+
+# 使用 BMP 后端（帧保存为 BMP 文件，无需 GPU）
+output_dir = tempfile.mkdtemp(prefix="replay_pipeline_")
+vlm_client = create_vlm_client("bmp", VLMConfig(model_path=output_dir))
+
+# 创建并运行 Pipeline
+pipeline = ReplayPipeline(stream_cfg, vlm_client)
+pipeline.run()  # 阻塞直到处理完毕
+# 帧图像将保存到 output_dir 目录
+print(f"处理完成！帧已保存到: {output_dir}")
+```
+
+#### Qwen3.5 本地模型示例（需要 GPU）
 
 ```python
 from pymediaparser import ReplayPipeline, StreamConfig, create_vlm_client
 from pymediaparser.vlm.configs import LocalVLMConfig
 
-# 配置视频文件（支持本地路径和网络 URL）
-stream_cfg = StreamConfig(
-    url="/path/to/video.mp4",  # 或 "http://example.com/video.mp4"
-    target_fps=0.5,  # 每 2 秒采样 1 帧
-)
-
+stream_cfg = StreamConfig(url="/path/to/video.mp4", target_fps=0.5)
 vlm_client = create_vlm_client("qwen35", LocalVLMConfig(device="cuda:0"))
 
-# 创建并运行 Pipeline（阻塞直到处理完毕）
 pipeline = ReplayPipeline(
     stream_cfg,
     vlm_client,
@@ -386,13 +522,13 @@ pipeline.run()
 
 #### VLM 后端选择指南
 
-| 后端 | 适用场景 | 安装要求 |
-|------|----------|----------|
-| `qwen2` | Qwen2-VL 本地 GPU 推理 | `[vlm-qwen]` |
-| `qwen3` | Qwen3-VL 本地 GPU 推理 | `[vlm-qwen]` |
-| `qwen35` | Qwen3.5 本地 GPU 推理（显存更低） | `[vlm-qwen]` |
-| `openai_api` | vLLM / Ollama / OpenAI API 服务 | 核心包 |
-| `bmp` | 调试模式（不调用模型） | 核心包 |
+| 后端 | 适用场景 | 安装要求 | 推荐度 |
+|------|----------|----------|--------|
+| `bmp` | 入门学习、调试验证（保存图像为 BMP） | 核心包 | ⭐⭐⭐ 入门首选 |
+| `qwen35` | Qwen3.5 本地 GPU 推理（显存约 1.4GB） | `[vlm-qwen]` | ⭐⭐⭐ 本地首选 |
+| `openai_api` | vLLM / Ollama / OpenAI API 服务 | 核心包 | ⭐⭐⭐ API 首选 |
+| `qwen2` | Qwen2-VL 本地 GPU 推理 | `[vlm-qwen]` | ⭐⭐ |
+| `qwen3` | Qwen3-VL 本地 GPU 推理 | `[vlm-qwen]` | ⭐⭐ |
 
 ### 结果处理
 
