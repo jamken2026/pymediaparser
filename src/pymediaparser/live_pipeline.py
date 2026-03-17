@@ -10,7 +10,7 @@ import logging
 import queue
 import threading
 import time
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional, Sequence, Union
 
 from PIL import Image
 import numpy as np
@@ -117,6 +117,8 @@ class LivePipeline(BasePipeline):
 
         # 初始化智能采样器（使用工厂模式）
         if self.enable_smart_sampling:
+            # 类型断言：enable_smart_sampling 为 True 时 smart_sampler 必不为 None
+            assert smart_sampler is not None
             self.smart_sampler = create_sampler(smart_sampler, smart_config)
             logger.info("智能采样器已启用: 类型=%s", smart_sampler)
 
