@@ -324,8 +324,8 @@ def main() -> None:
             api_kwargs["model_name"] = args.api_model
         if args.prompt:
             api_kwargs["default_prompt"] = args.prompt
-        api_cfg = APIVLMConfig(**api_kwargs)
-        vlm_client = create_vlm_client(backend, api_cfg)
+        vlm_cfg = APIVLMConfig(**api_kwargs)
+        vlm_client = create_vlm_client(backend, vlm_cfg)
     else:
         vlm_kwargs = {
             "device": args.device,
@@ -366,16 +366,14 @@ def main() -> None:
     logger.info("抽帧频率:   %.2f fps", stream_cfg.target_fps)
     logger.info("VLM 后端:   %s", backend)
     if backend == "openai_api":
-        logger.info("API 地址:   %s", api_cfg.base_url)
-        logger.info("API 模型:   %s", api_cfg.model_name)
-        logger.info("最大 tokens: %d", api_cfg.max_new_tokens)
-        logger.info("提示词:     %s", api_cfg.default_prompt)
+        logger.info("API 地址:   %s", vlm_cfg.base_url)
+        logger.info("API 模型:   %s", vlm_cfg.model_name)
     else:
         logger.info("推理设备:   %s", vlm_cfg.device)
         logger.info("推理精度:   %s", vlm_cfg.dtype)
         logger.info("模型路径:   %s", vlm_cfg.model_path)
-        logger.info("最大 tokens: %d", vlm_cfg.max_new_tokens)
-        logger.info("提示词:     %s", vlm_cfg.default_prompt)
+    logger.info("最大 tokens: %d", vlm_cfg.max_new_tokens)
+    logger.info("提示词:     %s", vlm_cfg.default_prompt)
     logger.info("队列大小:   %d", stream_cfg.max_queue_size)
     logger.info("解码模式:   %s", "仅关键帧" if stream_cfg.decode_mode == "keyframe_only" else "全帧解码")
     if not is_replay and args.callback_url:
